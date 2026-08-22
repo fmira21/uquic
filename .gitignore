@@ -1,2 +1,4 @@
+*.o
+quic_main
 *.pem
 roadmap.md
