@@ -17,6 +17,11 @@ int main() {
     ngtcp2_pkt_info pi;
     ngtcp2_ccerr ccerr;
     ngtcp2_ssize close_ret;
+    const char ping_msg[] = "ping";
+    size_t ping_len = sizeof(ping_msg) - 1;
+    size_t send_offset = 0;
+    int64_t stream_id = -1;
+    int stream_opened = 0;
 
     ret = 0;
 
@@ -55,11 +60,40 @@ int main() {
         ngtcp2_tstamp now, expiry, diff;
         int timeout_ms, pr;
 
+        if (client.handshake_done && !stream_opened) {
+            if (ngtcp2_conn_open_bidi_stream(client.conn, &stream_id, NULL) != 0) {
+                fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_open_bidi_stream failed\n");
+                ret = -1;
+                goto cleanup_ssl;
+            }
+            stream_opened = 1;
+        }
+
         for (;;) {
             ngtcp2_ssize datalen, wlen;
+            ngtcp2_vec vec;
+            const ngtcp2_vec *datav;
+            size_t datavcnt;
+            int64_t wstream_id;
+            uint32_t wflags;
 
             now = quic_timestamp();
-            wlen = ngtcp2_conn_writev_stream(client.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &datalen, 0, -1, NULL, 0, now);
+
+            if (stream_opened && send_offset < ping_len) {
+                vec.base = (uint8_t *)ping_msg + send_offset;
+                vec.len = ping_len - send_offset;
+                datav = &vec;
+                datavcnt = 1;
+                wstream_id = stream_id;
+                wflags = NGTCP2_WRITE_STREAM_FLAG_FIN;
+            } else {
+                datav = NULL;
+                datavcnt = 0;
+                wstream_id = -1;
+                wflags = 0;
+            }
+
+            wlen = ngtcp2_conn_writev_stream(client.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &datalen, wflags, wstream_id, datav, datavcnt, now);
 
             if (wlen < 0) {
                 fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_writev_stream failed\n");
@@ -69,6 +103,10 @@ int main() {
 
             if (wlen == 0) {
                 break;
+            }
+
+            if (datalen > 0 && wstream_id == stream_id) {
+                send_offset += (size_t)datalen;
             }
 
             if (send(sock, sbuf, (size_t)wlen, 0) < 0) {
@@ -82,7 +120,7 @@ int main() {
             }
         }
 
-        if (client.handshake_done) {
+        if (client.pong_received) {
             break;
         }
 

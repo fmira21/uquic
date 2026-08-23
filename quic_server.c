@@ -23,10 +23,14 @@ int main() {
     struct pollfd pfd;
     ngtcp2_ccerr ccerr;
     ngtcp2_ssize close_ret;
+    const char pong_msg[] = "pong";
+    size_t pong_len = sizeof(pong_msg) - 1;
+    size_t send_offset = 0;
 
     ret = 0;
 
     server.conn_ref.user_data = &server;
+    server.stream_id = -1;
 
     sock = quic_create_listen_socket(host, port);
     if (sock < 0) {
@@ -98,9 +102,29 @@ int main() {
 
         for (;;) {
             ngtcp2_ssize datalen, wlen;
+            ngtcp2_vec vec;
+            const ngtcp2_vec *datav;
+            size_t datavcnt;
+            int64_t wstream_id;
+            uint32_t wflags;
 
             now = quic_timestamp();
-            wlen = ngtcp2_conn_writev_stream(server.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &datalen, 0, -1, NULL, 0, now);
+
+            if (server.ping_received && send_offset < pong_len) {
+                vec.base = (uint8_t *)pong_msg + send_offset;
+                vec.len = pong_len - send_offset;
+                datav = &vec;
+                datavcnt = 1;
+                wstream_id = server.stream_id;
+                wflags = NGTCP2_WRITE_STREAM_FLAG_FIN;
+            } else {
+                datav = NULL;
+                datavcnt = 0;
+                wstream_id = -1;
+                wflags = 0;
+            }
+
+            wlen = ngtcp2_conn_writev_stream(server.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &datalen, wflags, wstream_id, datav, datavcnt, now);
 
             if (wlen < 0) {
                 fprintf(stderr, "quic_server.c, main(): ngtcp2_conn_writev_stream failed\n");
@@ -110,6 +134,10 @@ int main() {
 
             if (wlen == 0) {
                 break;
+            }
+
+            if (datalen > 0 && wstream_id == server.stream_id) {
+                send_offset += (size_t)datalen;
             }
 
             if (send(sock, sbuf, (size_t)wlen, 0) < 0) {
@@ -123,7 +151,7 @@ int main() {
             }
         }
 
-        if (server.handshake_done) {
+        if (server.ping_received && send_offset >= pong_len) {
             break;
         }
 
@@ -180,7 +208,7 @@ int main() {
         }
     }
 
-    fprintf(stderr, "quic_server.c, main(): handshake done\n");
+    fprintf(stderr, "quic_server.c, main(): pong sent\n");
 
     ngtcp2_ccerr_default(&ccerr);
     close_ret = ngtcp2_conn_write_connection_close(server.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &ccerr, quic_timestamp());

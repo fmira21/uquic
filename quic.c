@@ -326,6 +326,23 @@ static int quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
     return 0;
 }
 
+static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t offset, const uint8_t *data, size_t datalen, void *user_data, void *stream_user_data) {
+    quic_client *client = user_data;
+
+    (void)conn;
+    (void)stream_id;
+    (void)offset;
+    (void)stream_user_data;
+
+    fprintf(stderr, "client.c, quic_recv_stream_data_cb(): received %zu bytes: %.*s\n", datalen, (int)datalen, (const char *)data);
+
+    if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+        client->pong_received = 1;
+    }
+
+    return 0;
+}
+
 void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     memset(callbacks, 0, sizeof(*callbacks));
 
@@ -343,6 +360,7 @@ void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->rand = quic_rand_cb;
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
     callbacks->handshake_completed = quic_handshake_completed_cb;
+    callbacks->recv_stream_data = quic_recv_stream_data_cb;
 }
 
 static int quic_server_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
@@ -353,6 +371,24 @@ static int quic_server_handshake_completed_cb(ngtcp2_conn *conn, void *user_data
     fprintf(stderr, "quic.c, quic_server_handshake_completed_cb(): handshake completed\n");
 
     server->handshake_done = 1;
+
+    return 0;
+}
+
+static int quic_server_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t offset, const uint8_t *data, size_t datalen, void *user_data, void *stream_user_data) {
+    quic_server *server = user_data;
+
+    (void)conn;
+    (void)offset;
+    (void)stream_user_data;
+
+    fprintf(stderr, "quic.c, quic_server_recv_stream_data_cb(): received %zu bytes on stream %lld: %.*s\n", datalen, (long long)stream_id, (int)datalen, (const char *)data);
+
+    server->stream_id = stream_id;
+
+    if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+        server->ping_received = 1;
+    }
 
     return 0;
 }
@@ -372,6 +408,7 @@ void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->rand = quic_rand_cb;
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
     callbacks->handshake_completed = quic_server_handshake_completed_cb;
+    callbacks->recv_stream_data = quic_server_recv_stream_data_cb;
 }
 
 int quic_setup_path(int sock, ngtcp2_path_storage *ps) {
@@ -436,6 +473,10 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
 
     ngtcp2_transport_params_default(&params);
     params.initial_max_streams_uni = 3;
+    params.initial_max_streams_bidi = 1;
+    params.initial_max_stream_data_bidi_local = 65536;
+    params.initial_max_stream_data_bidi_remote = 65536;
+    params.initial_max_data = 65536;
 
     if (ngtcp2_conn_client_new(&conn, &dcid, &scid, &ps->path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &params, NULL, client) != 0) {
         fprintf(stderr, "client.c, quic_setup_conn(): ngtcp2_conn_client_new failed\n");
@@ -471,6 +512,10 @@ int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl
 
     ngtcp2_transport_params_default(&params);
     params.initial_max_streams_uni = 3;
+    params.initial_max_streams_bidi = 1;
+    params.initial_max_stream_data_bidi_local = 65536;
+    params.initial_max_stream_data_bidi_remote = 65536;
+    params.initial_max_data = 65536;
     params.original_dcid = hd->dcid;
     params.original_dcid_present = 1;
 

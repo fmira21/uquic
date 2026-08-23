@@ -15,12 +15,15 @@ typedef struct {
     ngtcp2_crypto_conn_ref conn_ref;
     ngtcp2_conn *conn;
     int handshake_done;
+    int pong_received;
 } quic_client;
 
 typedef struct {
     ngtcp2_crypto_conn_ref conn_ref;
     ngtcp2_conn *conn;
     int handshake_done;
+    int64_t stream_id;
+    int ping_received;
 } quic_server;
 
 int quic_create_socket(const char *host, const char *port);
