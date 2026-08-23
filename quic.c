@@ -345,6 +345,35 @@ void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->handshake_completed = quic_handshake_completed_cb;
 }
 
+static int quic_server_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
+    quic_server *server = user_data;
+
+    (void)conn;
+
+    fprintf(stderr, "quic.c, quic_server_handshake_completed_cb(): handshake completed\n");
+
+    server->handshake_done = 1;
+
+    return 0;
+}
+
+void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
+    memset(callbacks, 0, sizeof(*callbacks));
+
+    callbacks->recv_client_initial = ngtcp2_crypto_recv_client_initial_cb;
+    callbacks->recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb;
+    callbacks->encrypt = ngtcp2_crypto_encrypt_cb;
+    callbacks->decrypt = ngtcp2_crypto_decrypt_cb;
+    callbacks->hp_mask = ngtcp2_crypto_hp_mask_cb;
+    callbacks->update_key = ngtcp2_crypto_update_key_cb;
+    callbacks->delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb;
+    callbacks->delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
+    callbacks->get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb;
+    callbacks->rand = quic_rand_cb;
+    callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
+    callbacks->handshake_completed = quic_server_handshake_completed_cb;
+}
+
 int quic_setup_path(int sock, ngtcp2_path_storage *ps) {
     struct sockaddr_storage local_addr, remote_addr;
     socklen_t local_len, remote_len;
@@ -414,6 +443,43 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
     }
 
     client->conn = conn;
+    ngtcp2_conn_set_tls_native_handle(conn, ossl_ctx);
+
+    return 0;
+}
+
+int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_server *server, const ngtcp2_pkt_hd *hd) {
+    uint8_t buf[NGTCP2_MAX_CIDLEN];
+    size_t cidlen = 8;
+    ngtcp2_cid scid;
+    ngtcp2_settings settings;
+    ngtcp2_transport_params params;
+    ngtcp2_callbacks callbacks;
+    ngtcp2_conn *conn;
+
+    if (RAND_bytes(buf, (int)cidlen) != 1) {
+        fprintf(stderr, "quic.c, quic_setup_server_conn(): RAND_bytes (scid) failed\n");
+        return -1;
+    }
+
+    ngtcp2_cid_init(&scid, buf, cidlen);
+
+    quic_build_server_callbacks(&callbacks);
+
+    ngtcp2_settings_default(&settings);
+    settings.initial_ts = quic_timestamp();
+
+    ngtcp2_transport_params_default(&params);
+    params.initial_max_streams_uni = 3;
+    params.original_dcid = hd->dcid;
+    params.original_dcid_present = 1;
+
+    if (ngtcp2_conn_server_new(&conn, &hd->scid, &scid, &ps->path, hd->version, &callbacks, &settings, &params, NULL, server) != 0) {
+        fprintf(stderr, "quic.c, quic_setup_server_conn(): ngtcp2_conn_server_new failed\n");
+        return -1;
+    }
+
+    server->conn = conn;
     ngtcp2_conn_set_tls_native_handle(conn, ossl_ctx);
 
     return 0;
