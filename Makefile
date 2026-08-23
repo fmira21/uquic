@@ -5,12 +5,12 @@ PKG_LIBS := libngtcp2 libngtcp2_crypto_ossl libssl libcrypto
 CFLAGS += -Wall -Wextra -g $(shell pkg-config --cflags $(PKG_LIBS))
 LDFLAGS += $(shell pkg-config --libs $(PKG_LIBS)) -luring
 
-CLIENT_TARGET := quic_client
-CLIENT_SRCS := quic.c uquic.c quic_client.c
+CLIENT_TARGET := example_client
+CLIENT_SRCS := quic.c uquic.c example_client.c
 CLIENT_OBJS := $(CLIENT_SRCS:.c=.o)
 
-SERVER_TARGET := quic_server
-SERVER_SRCS := quic.c uquic.c quic_server.c
+SERVER_TARGET := example_server
+SERVER_SRCS := quic.c uquic.c example_server.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 
 ALL_SRCS := $(sort $(CLIENT_SRCS) $(SERVER_SRCS))

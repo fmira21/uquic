@@ -11,26 +11,26 @@ int main() {
 
     conn = uquic_accept("127.0.0.1", "4433", "cert.pem", "key.pem");
     if (conn == NULL) {
-        fprintf(stderr, "quic_server.c, main(): uquic_accept failed\n");
+        fprintf(stderr, "example_server.c, main(): uquic_accept failed\n");
         return -1;
     }
 
     n = uquic_recv(conn, &stream_id, buf, sizeof(buf), &fin);
     if (n < 0) {
-        fprintf(stderr, "quic_server.c, main(): uquic_recv failed\n");
+        fprintf(stderr, "example_server.c, main(): uquic_recv failed\n");
         uquic_close(conn);
         return -1;
     }
 
-    fprintf(stderr, "quic_server.c, main(): received %zd bytes on stream %lld: %.*s\n", n, (long long)stream_id, (int)n, buf);
+    fprintf(stderr, "example_server.c, main(): received %zd bytes on stream %lld: %.*s\n", n, (long long)stream_id, (int)n, buf);
 
     if (uquic_send(conn, stream_id, (const uint8_t *)pong_msg, sizeof(pong_msg) - 1, 1) != 0) {
-        fprintf(stderr, "quic_server.c, main(): uquic_send failed\n");
+        fprintf(stderr, "example_server.c, main(): uquic_send failed\n");
         uquic_close(conn);
         return -1;
     }
 
-    fprintf(stderr, "quic_server.c, main(): pong sent\n");
+    fprintf(stderr, "example_server.c, main(): pong sent\n");
 
     uquic_close(conn);
 

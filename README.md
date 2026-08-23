@@ -19,7 +19,7 @@ Mind that Docker doesn't enable io_uring support by default (security concerns),
 
 ## Generating a test certificate
 
-The QUIC server (`quic_server.c`) needs `cert.pem`/`key.pem` in the repo root. Generate a self-signed EC cert:
+The QUIC server (`example_server.c`) needs `cert.pem`/`key.pem` in the repo root. Generate a self-signed EC cert:
 
 ```
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
