@@ -3,6 +3,7 @@
 
 int main() {
     int sock;
+    int ret;
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
     ngtcp2_crypto_ossl_ctx *ossl_ctx = NULL;
@@ -10,11 +11,14 @@ int main() {
     quic_client client = {0};
     const char *host = "127.0.0.1";
     const char *port = "4433";
-    int ret = 0;
     uint8_t rbuf[65536];
     uint8_t sbuf[1452];
     struct pollfd pfd;
     ngtcp2_pkt_info pi;
+    ngtcp2_ccerr ccerr;
+    ngtcp2_ssize close_ret;
+
+    ret = 0;
 
     client.conn_ref.user_data = &client;
 
@@ -126,6 +130,20 @@ int main() {
             }
         }
     }
+
+    ngtcp2_ccerr_default(&ccerr);
+    close_ret = ngtcp2_conn_write_connection_close(client.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &ccerr, quic_timestamp());
+    if (close_ret > 0) {
+        if (send(sock, sbuf, (size_t)close_ret, 0) < 0) {
+            fprintf(stderr, "quic_main.c, main(): send(): %s\n", strerror(errno));
+            ret = -1;
+            goto cleanup_ssl;
+        }
+    }
+
+    SSL_free(ssl);
+    SSL_CTX_free(ssl_ctx);
+    close(sock);
 
     return 0;
 
