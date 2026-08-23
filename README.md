@@ -9,6 +9,8 @@ QUIC implementation uses ngtcp2 with openssl.
 Run `run_env.sh` to build a test environment in Docker.
 This might be helpful if you use Mac or Windows.
 
+Mind that Docker doesn't enable io_uring support by default (security concerns), so you have to add the flag `--security-opt seccomp=unconfined`.
+
 ## Build and run
 
 - QUIC client: `make client`.
