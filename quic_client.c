@@ -1,5 +1,17 @@
 #include "quic.h"
-#include <poll.h>
+#include <liburing.h>
+
+static int quic_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe_out) {
+    int rc;
+
+    for (;;) {
+        rc = io_uring_wait_cqe(ring, cqe_out);
+        if (rc == -EINTR) {
+            continue;
+        }
+        return rc;
+    }
+}
 
 int main() {
     int sock;
@@ -13,7 +25,7 @@ int main() {
     const char *port = "4433";
     uint8_t rbuf[65536];
     uint8_t sbuf[1452];
-    struct pollfd pfd;
+    struct io_uring ring;
     ngtcp2_pkt_info pi;
     ngtcp2_ccerr ccerr;
     ngtcp2_ssize close_ret;
@@ -50,19 +62,23 @@ int main() {
         goto cleanup_ssl;
     }
 
-    pfd.fd = sock;
-    pfd.events = POLLIN;
+    if (io_uring_queue_init(8, &ring, 0) != 0) {
+        fprintf(stderr, "quic_client.c, main(): io_uring_queue_init failed\n");
+        ret = -1;
+        goto cleanup_ssl;
+    }
+
     memset(&pi, 0, sizeof(pi));
 
     for (;;) {
         ngtcp2_tstamp now, expiry, diff;
-        int timeout_ms, pr;
+        int timeout_ms;
 
         if (client.handshake_done && !stream_opened) {
             if (ngtcp2_conn_open_bidi_stream(client.conn, &stream_id, NULL) != 0) {
                 fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_open_bidi_stream failed\n");
                 ret = -1;
-                goto cleanup_ssl;
+                goto cleanup_ring;
             }
             stream_opened = 1;
         }
@@ -74,6 +90,9 @@ int main() {
             size_t datavcnt;
             int64_t wstream_id;
             uint32_t wflags;
+            struct io_uring_sqe *sqe;
+            struct io_uring_cqe *cqe;
+            int wret;
 
             now = quic_timestamp();
 
@@ -96,7 +115,7 @@ int main() {
             if (wlen < 0) {
                 fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_writev_stream failed\n");
                 ret = -1;
-                goto cleanup_ssl;
+                goto cleanup_ring;
             }
 
             if (wlen == 0) {
@@ -107,14 +126,37 @@ int main() {
                 send_offset += (size_t)datalen;
             }
 
-            if (send(sock, sbuf, (size_t)wlen, 0) < 0) {
-                if (errno == ECONNREFUSED) {
-                    fprintf(stderr, "quic_client.c, main(): send(): peer already gone (ECONNREFUSED), stopping\n");
-                    goto cleanup_ssl;
-                }
-                fprintf(stderr, "quic_client.c, main(): send(): %s\n", strerror(errno));
+            sqe = io_uring_get_sqe(&ring);
+            if (sqe == NULL) {
+                fprintf(stderr, "quic_client.c, main(): io_uring_get_sqe (send) returned NULL\n");
                 ret = -1;
-                goto cleanup_ssl;
+                goto cleanup_ring;
+            }
+            io_uring_prep_send(sqe, sock, sbuf, (size_t)wlen, 0);
+
+            if (io_uring_submit(&ring) < 0) {
+                fprintf(stderr, "quic_client.c, main(): io_uring_submit (send) failed\n");
+                ret = -1;
+                goto cleanup_ring;
+            }
+
+            if (quic_wait_cqe(&ring, &cqe) < 0) {
+                fprintf(stderr, "quic_client.c, main(): io_uring_wait_cqe (send) failed\n");
+                ret = -1;
+                goto cleanup_ring;
+            }
+
+            wret = cqe->res;
+            io_uring_cqe_seen(&ring, cqe);
+
+            if (wret < 0) {
+                if (-wret == ECONNREFUSED) {
+                    fprintf(stderr, "quic_client.c, main(): send(): peer already gone (ECONNREFUSED), stopping\n");
+                    goto cleanup_ring;
+                }
+                fprintf(stderr, "quic_client.c, main(): send(): %s\n", strerror(-wret));
+                ret = -1;
+                goto cleanup_ring;
             }
         }
 
@@ -129,7 +171,7 @@ int main() {
             if (ngtcp2_conn_handle_expiry(client.conn, now) != 0) {
                 fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_handle_expiry failed\n");
                 ret = -1;
-                goto cleanup_ssl;
+                goto cleanup_ring;
             }
             now = quic_timestamp();
             expiry = ngtcp2_conn_get_expiry(client.conn);
@@ -142,35 +184,83 @@ int main() {
             timeout_ms = (int)((diff + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS);
         }
 
-        pr = poll(&pfd, 1, timeout_ms);
-        if (pr < 0) {
-            if (errno == EINTR) {
-                continue;
+        {
+            struct io_uring_sqe *rsqe;
+            struct __kernel_timespec ts;
+            int have_timeout = (timeout_ms >= 0);
+            int recv_res = 0;
+            int got_recv = 0;
+            int pending = 1;
+
+            rsqe = io_uring_get_sqe(&ring);
+            if (rsqe == NULL) {
+                fprintf(stderr, "quic_client.c, main(): io_uring_get_sqe (recv) returned NULL\n");
+                ret = -1;
+                goto cleanup_ring;
             }
-            fprintf(stderr, "quic_client.c, main(): poll(): %s\n", strerror(errno));
-            ret = -1;
-            goto cleanup_ssl;
-        }
+            io_uring_prep_recv(rsqe, sock, rbuf, sizeof(rbuf), 0);
+            io_uring_sqe_set_data(rsqe, (void *)(uintptr_t)1);
 
-        if (pr > 0 && (pfd.revents & POLLIN)) {
-            ssize_t n = recv(sock, rbuf, sizeof(rbuf), 0);
+            if (have_timeout) {
+                struct io_uring_sqe *tsqe;
 
-            if (n < 0) {
-                if (errno == ECONNREFUSED) {
-                    fprintf(stderr, "quic_client.c, main(): recv(): peer already gone (ECONNREFUSED), stopping\n");
-                    goto cleanup_ssl;
+                rsqe->flags |= IOSQE_IO_LINK;
+                ts.tv_sec = timeout_ms / 1000;
+                ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
+
+                tsqe = io_uring_get_sqe(&ring);
+                if (tsqe == NULL) {
+                    fprintf(stderr, "quic_client.c, main(): io_uring_get_sqe (timeout) returned NULL\n");
+                    ret = -1;
+                    goto cleanup_ring;
                 }
-                fprintf(stderr, "quic_client.c, main(): recv(): %s\n", strerror(errno));
-                ret = -1;
-                goto cleanup_ssl;
+                io_uring_prep_link_timeout(tsqe, &ts, 0);
+                io_uring_sqe_set_data(tsqe, (void *)(uintptr_t)2);
+                pending = 2;
             }
 
-            now = quic_timestamp();
-
-            if (ngtcp2_conn_read_pkt(client.conn, &ps.path, &pi, rbuf, (size_t)n, now) != 0) {
-                fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_read_pkt failed\n");
+            if (io_uring_submit(&ring) < 0) {
+                fprintf(stderr, "quic_client.c, main(): io_uring_submit (recv) failed\n");
                 ret = -1;
-                goto cleanup_ssl;
+                goto cleanup_ring;
+            }
+
+            while (pending > 0) {
+                struct io_uring_cqe *cqe;
+
+                if (quic_wait_cqe(&ring, &cqe) < 0) {
+                    fprintf(stderr, "quic_client.c, main(): io_uring_wait_cqe (recv) failed\n");
+                    ret = -1;
+                    goto cleanup_ring;
+                }
+
+                if ((uintptr_t)io_uring_cqe_get_data(cqe) == 1) {
+                    recv_res = cqe->res;
+                    got_recv = 1;
+                }
+
+                io_uring_cqe_seen(&ring, cqe);
+                pending--;
+            }
+
+            if (got_recv && recv_res != -ECANCELED) {
+                if (recv_res < 0) {
+                    if (-recv_res == ECONNREFUSED) {
+                        fprintf(stderr, "quic_client.c, main(): recv(): peer already gone (ECONNREFUSED), stopping\n");
+                        goto cleanup_ring;
+                    }
+                    fprintf(stderr, "quic_client.c, main(): recv(): %s\n", strerror(-recv_res));
+                    ret = -1;
+                    goto cleanup_ring;
+                }
+
+                now = quic_timestamp();
+
+                if (ngtcp2_conn_read_pkt(client.conn, &ps.path, &pi, rbuf, (size_t)recv_res, now) != 0) {
+                    fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_read_pkt failed\n");
+                    ret = -1;
+                    goto cleanup_ring;
+                }
             }
         }
     }
@@ -178,10 +268,26 @@ int main() {
     ngtcp2_ccerr_default(&ccerr);
     close_ret = ngtcp2_conn_write_connection_close(client.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &ccerr, quic_timestamp());
     if (close_ret > 0) {
-        if (send(sock, sbuf, (size_t)close_ret, 0) < 0) {
-            fprintf(stderr, "quic_client.c, main(): send() for connection_close failed (peer likely already gone): %s\n", strerror(errno));
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+        struct io_uring_cqe *cqe;
+
+        if (sqe == NULL) {
+            fprintf(stderr, "quic_client.c, main(): io_uring_get_sqe (connection_close) returned NULL\n");
+        } else {
+            io_uring_prep_send(sqe, sock, sbuf, (size_t)close_ret, 0);
+
+            if (io_uring_submit(&ring) < 0 || quic_wait_cqe(&ring, &cqe) < 0) {
+                fprintf(stderr, "quic_client.c, main(): io_uring send for connection_close failed\n");
+            } else {
+                if (cqe->res < 0) {
+                    fprintf(stderr, "quic_client.c, main(): send() for connection_close failed (peer likely already gone): %s\n", strerror(-cqe->res));
+                }
+                io_uring_cqe_seen(&ring, cqe);
+            }
         }
     }
+
+    io_uring_queue_exit(&ring);
 
     if (client.conn) {
         ngtcp2_conn_del(client.conn);
@@ -193,6 +299,8 @@ int main() {
 
     return 0;
 
+cleanup_ring:
+    io_uring_queue_exit(&ring);
 cleanup_ssl:
     if (client.conn) {
         ngtcp2_conn_del(client.conn);

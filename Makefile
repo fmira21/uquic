@@ -3,7 +3,7 @@ CC ?= clang-19
 PKG_LIBS := libngtcp2 libngtcp2_crypto_ossl libssl libcrypto
 
 CFLAGS += -Wall -Wextra -g $(shell pkg-config --cflags $(PKG_LIBS))
-LDFLAGS += $(shell pkg-config --libs $(PKG_LIBS))
+LDFLAGS += $(shell pkg-config --libs $(PKG_LIBS)) -luring
 
 CLIENT_TARGET := quic_client
 CLIENT_SRCS := quic.c quic_client.c
