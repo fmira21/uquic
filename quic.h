@@ -25,3 +25,4 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
 int quic_setup_path(int sock, ngtcp2_path_storage *ps);
 void quic_build_callbacks(ngtcp2_callbacks *callbacks);
 int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_client *client);
+ngtcp2_tstamp quic_timestamp(void);

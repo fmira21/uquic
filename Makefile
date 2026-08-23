@@ -17,7 +17,12 @@ $(QUIC_TARGET): $(QUIC_OBJS)
 %.o: %.c quic.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
+check:
+	@for src in $(QUIC_SRCS); do \
+		$(CC) $(CFLAGS) -fsyntax-only $$src || exit 1; \
+	done
+
 clean:
 	rm -f $(QUIC_OBJS) $(QUIC_TARGET)
 
-.PHONY: quic clean
+.PHONY: quic check clean

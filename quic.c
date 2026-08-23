@@ -156,10 +156,15 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
 }
 
 static void quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx) {
+    (void)rand_ctx;
+
     RAND_bytes(dest, (int)destlen);
 }
 
 static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, ngtcp2_stateless_reset_token *token, size_t cidlen, void *user_data) {
+    (void)conn;
+    (void)user_data;
+
     if (RAND_bytes(cid->data, (int)cidlen) != 1) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
@@ -175,6 +180,8 @@ static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, ngt
 
 static int quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
     quic_client *client = user_data;
+
+    (void)conn;
 
     fprintf(stderr, "client.c, quic_handshake_completed_cb(): handshake completed\n");
 
@@ -226,6 +233,14 @@ int quic_setup_path(int sock, ngtcp2_path_storage *ps) {
     return 0;
 }
 
+ngtcp2_tstamp quic_timestamp(void) {
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return (ngtcp2_tstamp)ts.tv_sec * NGTCP2_SECONDS + (ngtcp2_tstamp)ts.tv_nsec;
+}
+
 int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_client *client) {
     uint8_t buf[NGTCP2_MAX_CIDLEN];
     size_t cidlen = 8;
@@ -233,7 +248,6 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
     ngtcp2_settings settings;
     ngtcp2_transport_params params;
     ngtcp2_callbacks callbacks;
-    struct timespec ts;
     ngtcp2_conn *conn;
 
     if (RAND_bytes(buf, (int)cidlen) != 1) {
@@ -253,10 +267,10 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
     quic_build_callbacks(&callbacks);
 
     ngtcp2_settings_default(&settings);
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    settings.initial_ts = (ngtcp2_tstamp)ts.tv_sec * NGTCP2_SECONDS + (ngtcp2_tstamp)ts.tv_nsec;
+    settings.initial_ts = quic_timestamp();
 
     ngtcp2_transport_params_default(&params);
+    params.initial_max_streams_uni = 3;
 
     if (ngtcp2_conn_client_new(&conn, &dcid, &scid, &ps->path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &params, NULL, client) != 0) {
         fprintf(stderr, "client.c, quic_setup_conn(): ngtcp2_conn_client_new failed\n");
@@ -268,3 +282,5 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
 
     return 0;
 }
+
+

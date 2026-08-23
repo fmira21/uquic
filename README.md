@@ -9,6 +9,6 @@ QUIC implementation uses ngtcp2 with openssl.
 Run `run_env.sh` to build a test environment in Docker.
 This might be helpful if you use Mac or Windows.
 
-## Building
+## Build and run
 
 - QUIC implementation alone: `make quic`.
