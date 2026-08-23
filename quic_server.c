@@ -21,6 +21,8 @@ int main() {
     ngtcp2_pkt_hd hd;
     ngtcp2_pkt_info pi;
     struct pollfd pfd;
+    ngtcp2_ccerr ccerr;
+    ngtcp2_ssize close_ret;
 
     ret = 0;
 
@@ -111,6 +113,10 @@ int main() {
             }
 
             if (send(sock, sbuf, (size_t)wlen, 0) < 0) {
+                if (errno == ECONNREFUSED) {
+                    fprintf(stderr, "quic_server.c, main(): send(): peer already gone (ECONNREFUSED), stopping\n");
+                    goto cleanup_ssl;
+                }
                 fprintf(stderr, "quic_server.c, main(): send(): %s\n", strerror(errno));
                 ret = -1;
                 goto cleanup_ssl;
@@ -155,6 +161,10 @@ int main() {
             ssize_t rn = recv(sock, rbuf, sizeof(rbuf), 0);
 
             if (rn < 0) {
+                if (errno == ECONNREFUSED) {
+                    fprintf(stderr, "quic_server.c, main(): recv(): peer already gone (ECONNREFUSED), stopping\n");
+                    goto cleanup_ssl;
+                }
                 fprintf(stderr, "quic_server.c, main(): recv(): %s\n", strerror(errno));
                 ret = -1;
                 goto cleanup_ssl;
@@ -171,6 +181,14 @@ int main() {
     }
 
     fprintf(stderr, "quic_server.c, main(): handshake done\n");
+
+    ngtcp2_ccerr_default(&ccerr);
+    close_ret = ngtcp2_conn_write_connection_close(server.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &ccerr, quic_timestamp());
+    if (close_ret > 0) {
+        if (send(sock, sbuf, (size_t)close_ret, 0) < 0) {
+            fprintf(stderr, "quic_server.c, main(): send() for connection_close failed (peer likely already gone): %s\n", strerror(errno));
+        }
+    }
 
 cleanup_ssl:
     if (server.conn) {

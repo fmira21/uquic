@@ -62,7 +62,7 @@ int main() {
             wlen = ngtcp2_conn_writev_stream(client.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &datalen, 0, -1, NULL, 0, now);
 
             if (wlen < 0) {
-                fprintf(stderr, "quic_main.c, main(): ngtcp2_conn_writev_stream failed\n");
+                fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_writev_stream failed\n");
                 ret = -1;
                 goto cleanup_ssl;
             }
@@ -72,7 +72,11 @@ int main() {
             }
 
             if (send(sock, sbuf, (size_t)wlen, 0) < 0) {
-                fprintf(stderr, "quic_main.c, main(): send(): %s\n", strerror(errno));
+                if (errno == ECONNREFUSED) {
+                    fprintf(stderr, "quic_client.c, main(): send(): peer already gone (ECONNREFUSED), stopping\n");
+                    goto cleanup_ssl;
+                }
+                fprintf(stderr, "quic_client.c, main(): send(): %s\n", strerror(errno));
                 ret = -1;
                 goto cleanup_ssl;
             }
@@ -87,7 +91,7 @@ int main() {
 
         if (expiry <= now) {
             if (ngtcp2_conn_handle_expiry(client.conn, now) != 0) {
-                fprintf(stderr, "quic_main.c, main(): ngtcp2_conn_handle_expiry failed\n");
+                fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_handle_expiry failed\n");
                 ret = -1;
                 goto cleanup_ssl;
             }
@@ -107,7 +111,7 @@ int main() {
             if (errno == EINTR) {
                 continue;
             }
-            fprintf(stderr, "quic_main.c, main(): poll(): %s\n", strerror(errno));
+            fprintf(stderr, "quic_client.c, main(): poll(): %s\n", strerror(errno));
             ret = -1;
             goto cleanup_ssl;
         }
@@ -116,7 +120,11 @@ int main() {
             ssize_t n = recv(sock, rbuf, sizeof(rbuf), 0);
 
             if (n < 0) {
-                fprintf(stderr, "quic_main.c, main(): recv(): %s\n", strerror(errno));
+                if (errno == ECONNREFUSED) {
+                    fprintf(stderr, "quic_client.c, main(): recv(): peer already gone (ECONNREFUSED), stopping\n");
+                    goto cleanup_ssl;
+                }
+                fprintf(stderr, "quic_client.c, main(): recv(): %s\n", strerror(errno));
                 ret = -1;
                 goto cleanup_ssl;
             }
@@ -124,7 +132,7 @@ int main() {
             now = quic_timestamp();
 
             if (ngtcp2_conn_read_pkt(client.conn, &ps.path, &pi, rbuf, (size_t)n, now) != 0) {
-                fprintf(stderr, "quic_main.c, main(): ngtcp2_conn_read_pkt failed\n");
+                fprintf(stderr, "quic_client.c, main(): ngtcp2_conn_read_pkt failed\n");
                 ret = -1;
                 goto cleanup_ssl;
             }
@@ -135,9 +143,7 @@ int main() {
     close_ret = ngtcp2_conn_write_connection_close(client.conn, &ps.path, &pi, sbuf, sizeof(sbuf), &ccerr, quic_timestamp());
     if (close_ret > 0) {
         if (send(sock, sbuf, (size_t)close_ret, 0) < 0) {
-            fprintf(stderr, "quic_main.c, main(): send(): %s\n", strerror(errno));
-            ret = -1;
-            goto cleanup_ssl;
+            fprintf(stderr, "quic_client.c, main(): send() for connection_close failed (peer likely already gone): %s\n", strerror(errno));
         }
     }
 
