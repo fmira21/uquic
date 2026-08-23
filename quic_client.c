@@ -3,7 +3,7 @@
 
 int main() {
     int sock;
-    int ret;
+    int ret = 0;
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
     ngtcp2_crypto_ossl_ctx *ossl_ctx = NULL;
@@ -22,8 +22,6 @@ int main() {
     size_t send_offset = 0;
     int64_t stream_id = -1;
     int stream_opened = 0;
-
-    ret = 0;
 
     client.conn_ref.user_data = &client;
 

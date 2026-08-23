@@ -3,7 +3,7 @@
 
 int main() {
     int sock;
-    int ret;
+    int ret = 0;
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
     ngtcp2_crypto_ossl_ctx *ossl_ctx = NULL;
@@ -26,8 +26,6 @@ int main() {
     const char pong_msg[] = "pong";
     size_t pong_len = sizeof(pong_msg) - 1;
     size_t send_offset = 0;
-
-    ret = 0;
 
     server.conn_ref.user_data = &server;
     server.stream_id = -1;
