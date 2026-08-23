@@ -11,4 +11,6 @@ This might be helpful if you use Mac or Windows.
 
 ## Build and run
 
-- QUIC implementation alone: `make quic`.
+- QUIC client: `make client`.
+- QUIC server: `make server`.
+- Both: `make all`.

@@ -40,6 +40,47 @@ int quic_create_socket(const char *host, const char *port) {
     return s;
 }
 
+int quic_create_listen_socket(const char *host, const char *port) {
+    struct addrinfo hints;
+    struct addrinfo *res, *rp;
+    int rv;
+    int s = -1;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    rv = getaddrinfo(host, port, &hints, &res);
+    if (rv != 0) {
+        fprintf(stderr, "quic.c, quic_create_listen_socket(): %s\n", gai_strerror(rv));
+        return -1;
+    }
+
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (s == -1) {
+            continue;
+        }
+
+        if (bind(s, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
+
+        close(s);
+        s = -1;
+    }
+
+    freeaddrinfo(res);
+
+    if (s == -1) {
+        fprintf(stderr, "quic.c, quic_create_listen_socket(): %s\n", strerror(errno));
+        return -1;
+    }
+
+    return s;
+}
+
 int quic_get_local_addr (int sock, struct sockaddr_storage *out_addr, socklen_t *out_len) {
     socklen_t ss_len;
     int sn;

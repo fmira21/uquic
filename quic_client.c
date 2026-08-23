@@ -141,6 +141,10 @@ int main() {
         }
     }
 
+    if (client.conn) {
+        ngtcp2_conn_del(client.conn);
+    }
+    ngtcp2_crypto_ossl_ctx_del(ossl_ctx);
     SSL_free(ssl);
     SSL_CTX_free(ssl_ctx);
     close(sock);
@@ -148,6 +152,10 @@ int main() {
     return 0;
 
 cleanup_ssl:
+    if (client.conn) {
+        ngtcp2_conn_del(client.conn);
+    }
+    ngtcp2_crypto_ossl_ctx_del(ossl_ctx);
     SSL_free(ssl);
 cleanup_ssl_ctx:
     SSL_CTX_free(ssl_ctx);

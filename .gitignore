@@ -1,4 +1,5 @@
 *.o
-quic_main
+quic_client
+quic_server
 *.pem
 roadmap.md

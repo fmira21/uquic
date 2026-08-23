@@ -18,6 +18,7 @@ typedef struct {
 } quic_client;
 
 int quic_create_socket(const char *host, const char *port);
+int quic_create_listen_socket(const char *host, const char *port);
 int quic_get_local_addr (int sock, struct sockaddr_storage *out_addr, socklen_t *out_len);
 int quic_get_remote_addr(int sock, struct sockaddr_storage *out_addr, socklen_t *out_len);
 int quic_create_ssl_ctx(SSL_CTX **out_ctx);
