@@ -2,7 +2,27 @@
 
 uquic implements interaction between processes over network using io_uring for in-host leg and QUIC protocol in between.
 
-QUIC implementation uses ngtcp2 with openssl.
+This library is a prototype and serves rather for testing the concept against similar implementations in various usecases.
+
+QUIC implementation uses [ngtcp2](https://github.com/ngtcp2/ngtcp2) with OpenSSL.
+io_uring layer uses [liburing](https://github.com/axboe/liburing/blob/master/src/include/liburing.h). 
+
+## API
+
+`uquic.h` contains connect/accept/send/recv functions over `uquic_conn`:
+
+```c
+uquic_conn *uquic_connect(const char *host, const char *port);
+uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_file, const char *key_file);
+int64_t uquic_stream_open(uquic_conn *conn);
+int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t len, int fin);
+ssize_t uquic_recv(uquic_conn *conn, int64_t *stream_id, uint8_t *buf, size_t buflen, int *fin);
+int uquic_close(uquic_conn *conn);
+```
+
+Underlying QUIC functions are covered in `quic.h`
+
+See `example_client.c`/`example_server.c` for usage.
 
 ## Run test Linux environment in Docker
 
