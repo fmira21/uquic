@@ -6,11 +6,11 @@ CFLAGS += -Wall -Wextra -g $(shell pkg-config --cflags $(PKG_LIBS))
 LDFLAGS += $(shell pkg-config --libs $(PKG_LIBS)) -luring
 
 CLIENT_TARGET := quic_client
-CLIENT_SRCS := quic.c quic_client.c
+CLIENT_SRCS := quic.c uquic.c quic_client.c
 CLIENT_OBJS := $(CLIENT_SRCS:.c=.o)
 
 SERVER_TARGET := quic_server
-SERVER_SRCS := quic.c quic_server.c
+SERVER_SRCS := quic.c uquic.c quic_server.c
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 
 ALL_SRCS := $(sort $(CLIENT_SRCS) $(SERVER_SRCS))
@@ -27,7 +27,7 @@ $(CLIENT_TARGET): $(CLIENT_OBJS)
 $(SERVER_TARGET): $(SERVER_OBJS)
 	$(CC) $(SERVER_OBJS) -o $@ $(LDFLAGS)
 
-%.o: %.c quic.h
+%.o: %.c quic.h uquic.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 check:

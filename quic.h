@@ -1,30 +1,41 @@
 #include <errno.h>
 #include <netdb.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <liburing.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <ngtcp2/ngtcp2_crypto.h>
 #include <ngtcp2/ngtcp2_crypto_ossl.h>
 
-typedef struct {
-    ngtcp2_crypto_conn_ref conn_ref;
-    ngtcp2_conn *conn;
-    int handshake_done;
-    int pong_received;
-} quic_client;
+#define QUIC_SEND_BATCH 8
 
-typedef struct {
+struct uquic_conn {
     ngtcp2_crypto_conn_ref conn_ref;
     ngtcp2_conn *conn;
     int handshake_done;
-    int64_t stream_id;
-    int ping_received;
-} quic_server;
+
+    int sock;
+    SSL_CTX *ssl_ctx;
+    SSL *ssl;
+    ngtcp2_crypto_ossl_ctx *ossl_ctx;
+    ngtcp2_path_storage ps;
+    ngtcp2_pkt_info pi;
+    struct io_uring ring;
+
+    uint8_t sbuf[QUIC_SEND_BATCH][1452];
+    uint8_t rbuf[65536];
+
+    int recv_pending;
+    int64_t recv_stream_id;
+    size_t recv_len;
+    int recv_fin;
+};
 
 int quic_create_socket(const char *host, const char *port);
 int quic_create_listen_socket(const char *host, const char *port);
@@ -37,6 +48,6 @@ int quic_setup_server_tls_session(SSL_CTX *ssl_ctx, ngtcp2_crypto_conn_ref *conn
 int quic_setup_path(int sock, ngtcp2_path_storage *ps);
 void quic_build_callbacks(ngtcp2_callbacks *callbacks);
 void quic_build_server_callbacks(ngtcp2_callbacks *callbacks);
-int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_client *client);
-int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_server *server, const ngtcp2_pkt_hd *hd);
+int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, struct uquic_conn *uc);
+int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, struct uquic_conn *uc, const ngtcp2_pkt_hd *hd);
 ngtcp2_tstamp quic_timestamp(void);

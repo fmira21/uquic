@@ -12,7 +12,7 @@ int quic_create_socket(const char *host, const char *port) {
 
     rv = getaddrinfo(host, port, &hints, &res);
     if (rv != 0) {
-        fprintf(stderr, "client.c, getaddrinfo(): %s\n", gai_strerror(rv));
+        fprintf(stderr, "quic.c, quic_create_socket(): %s\n", gai_strerror(rv));
         return -1;
     }
 
@@ -33,7 +33,7 @@ int quic_create_socket(const char *host, const char *port) {
     freeaddrinfo(res);
 
     if (s == -1) {
-        fprintf(stderr, "client.c, quic_create_socket(): %s\n", strerror(errno));
+        fprintf(stderr, "quic.c, quic_create_socket(): %s\n", strerror(errno));
         return -1;
     }
 
@@ -89,7 +89,7 @@ int quic_get_local_addr (int sock, struct sockaddr_storage *out_addr, socklen_t 
     sn = getsockname(sock, (struct sockaddr *)out_addr, &ss_len);
 
     if(sn == -1) {
-        fprintf(stderr, "client.c, quic_get_local_addr(): %s\n", strerror(errno));
+        fprintf(stderr, "quic.c, quic_get_local_addr(): %s\n", strerror(errno));
         return -1;
     }
 
@@ -106,7 +106,7 @@ int quic_get_remote_addr(int sock, struct sockaddr_storage *out_addr, socklen_t 
     pn = getpeername(sock, (struct sockaddr *)out_addr, &ss_len);
 
     if(pn == -1) {
-        fprintf(stderr, "client.c, quic_get_remote_addr(): %s\n", strerror(errno));
+        fprintf(stderr, "quic.c, quic_get_remote_addr(): %s\n", strerror(errno));
         return -1;
     }
 
@@ -121,7 +121,7 @@ int quic_create_ssl_ctx(SSL_CTX **out_ctx) {
     sslctx = SSL_CTX_new(TLS_client_method());
 
     if (sslctx == NULL) {
-        fprintf(stderr, "client.c, quic_create_ssl_ctx(): SSL_CTX_new failed\n");
+        fprintf(stderr, "quic.c, quic_create_ssl_ctx(): SSL_CTX_new failed\n");
         ERR_print_errors_fp(stderr);
         return -1;
     }
@@ -135,19 +135,11 @@ int quic_create_ssl_ctx(SSL_CTX **out_ctx) {
 }
 
 static ngtcp2_conn *quic_get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
-    quic_client *client;
+    struct uquic_conn *uc;
 
-    client = conn_ref->user_data;
+    uc = conn_ref->user_data;
 
-    return client->conn;
-}
-
-static ngtcp2_conn *quic_server_get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
-    quic_server *server;
-
-    server = conn_ref->user_data;
-
-    return server->conn;
+    return uc->conn;
 }
 
 static int quic_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in, unsigned int inlen, void *arg) {
@@ -210,7 +202,7 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
     ssl = SSL_new(ssl_ctx);
 
     if (ssl == NULL) {
-        fprintf(stderr, "client.c, quic_setup_tls_session(): SSL_new failed\n");
+        fprintf(stderr, "quic.c, quic_setup_tls_session(): SSL_new failed\n");
         ERR_print_errors_fp(stderr);
         return -1;
     }
@@ -220,7 +212,7 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
     alpnproto = SSL_set_alpn_protos(ssl, (const unsigned char *)"\x02h3", 3);
 
     if (alpnproto != 0) {
-        fprintf(stderr, "client.c, quic_setup_tls_session(): SSL_set_alpn_protos failed\n");
+        fprintf(stderr, "quic.c, quic_setup_tls_session(): SSL_set_alpn_protos failed\n");
         ERR_print_errors_fp(stderr);
         SSL_free(ssl);
         return -1;
@@ -229,7 +221,7 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
     tlshn = SSL_set_tlsext_host_name(ssl, host);
 
     if (tlshn == 0) {
-        fprintf(stderr, "client.c, quic_setup_tls_session(): SSL_set_tlsext_host_name failed\n");
+        fprintf(stderr, "quic.c, quic_setup_tls_session(): SSL_set_tlsext_host_name failed\n");
         ERR_print_errors_fp(stderr);
         SSL_free(ssl);
         return -1;
@@ -239,13 +231,13 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
     SSL_set_app_data(ssl, conn_ref);
 
     if (ngtcp2_crypto_ossl_configure_client_session(ssl) != 0) {
-        fprintf(stderr, "client.c, quic_setup_tls_session(): ngtcp2_crypto_ossl_configure_client_session failed\n");
+        fprintf(stderr, "quic.c, quic_setup_tls_session(): ngtcp2_crypto_ossl_configure_client_session failed\n");
         SSL_free(ssl);
         return -1;
     }
 
     if (ngtcp2_crypto_ossl_ctx_new(&ossl_ctx, ssl) != 0) {
-        fprintf(stderr, "client.c, quic_setup_tls_session(): ngtcp2_crypto_ossl_ctx_new failed\n");
+        fprintf(stderr, "quic.c, quic_setup_tls_session(): ngtcp2_crypto_ossl_ctx_new failed\n");
         SSL_free(ssl);
         return -1;
     }
@@ -270,7 +262,7 @@ int quic_setup_server_tls_session(SSL_CTX *ssl_ctx, ngtcp2_crypto_conn_ref *conn
 
     SSL_set_accept_state(ssl);
 
-    conn_ref->get_conn = quic_server_get_conn;
+    conn_ref->get_conn = quic_get_conn;
     SSL_set_app_data(ssl, conn_ref);
 
     if (ngtcp2_crypto_ossl_configure_server_session(ssl) != 0) {
@@ -315,30 +307,32 @@ static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, ngt
 }
 
 static int quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
-    quic_client *client = user_data;
+    struct uquic_conn *uc = user_data;
 
     (void)conn;
 
-    fprintf(stderr, "client.c, quic_handshake_completed_cb(): handshake completed\n");
+    fprintf(stderr, "quic.c, quic_handshake_completed_cb(): handshake completed\n");
 
-    client->handshake_done = 1;
+    uc->handshake_done = 1;
 
     return 0;
 }
 
 static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t offset, const uint8_t *data, size_t datalen, void *user_data, void *stream_user_data) {
-    quic_client *client = user_data;
+    struct uquic_conn *uc = user_data;
+    size_t n;
 
     (void)conn;
-    (void)stream_id;
     (void)offset;
     (void)stream_user_data;
 
-    fprintf(stderr, "client.c, quic_recv_stream_data_cb(): received %zu bytes: %.*s\n", datalen, (int)datalen, (const char *)data);
+    n = datalen < sizeof(uc->rbuf) ? datalen : sizeof(uc->rbuf);
+    memcpy(uc->rbuf, data, n);
 
-    if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
-        client->pong_received = 1;
-    }
+    uc->recv_stream_id = stream_id;
+    uc->recv_len = n;
+    uc->recv_fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ? 1 : 0;
+    uc->recv_pending = 1;
 
     return 0;
 }
@@ -363,36 +357,6 @@ void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->recv_stream_data = quic_recv_stream_data_cb;
 }
 
-static int quic_server_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
-    quic_server *server = user_data;
-
-    (void)conn;
-
-    fprintf(stderr, "quic.c, quic_server_handshake_completed_cb(): handshake completed\n");
-
-    server->handshake_done = 1;
-
-    return 0;
-}
-
-static int quic_server_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t offset, const uint8_t *data, size_t datalen, void *user_data, void *stream_user_data) {
-    quic_server *server = user_data;
-
-    (void)conn;
-    (void)offset;
-    (void)stream_user_data;
-
-    fprintf(stderr, "quic.c, quic_server_recv_stream_data_cb(): received %zu bytes on stream %lld: %.*s\n", datalen, (long long)stream_id, (int)datalen, (const char *)data);
-
-    server->stream_id = stream_id;
-
-    if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
-        server->ping_received = 1;
-    }
-
-    return 0;
-}
-
 void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
     memset(callbacks, 0, sizeof(*callbacks));
 
@@ -407,8 +371,8 @@ void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb;
     callbacks->rand = quic_rand_cb;
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
-    callbacks->handshake_completed = quic_server_handshake_completed_cb;
-    callbacks->recv_stream_data = quic_server_recv_stream_data_cb;
+    callbacks->handshake_completed = quic_handshake_completed_cb;
+    callbacks->recv_stream_data = quic_recv_stream_data_cb;
 }
 
 int quic_setup_path(int sock, ngtcp2_path_storage *ps) {
@@ -419,14 +383,14 @@ int quic_setup_path(int sock, ngtcp2_path_storage *ps) {
     la = quic_get_local_addr(sock, &local_addr, &local_len);
 
     if (la != 0) {
-        fprintf(stderr, "client.c, quic_setup_path(): quic_get_local_addr failed\n");
+        fprintf(stderr, "quic.c, quic_setup_path(): quic_get_local_addr failed\n");
         return -1;
     }
 
     ra = quic_get_remote_addr(sock, &remote_addr, &remote_len);
 
     if (ra != 0) {
-        fprintf(stderr, "client.c, quic_setup_path(): quic_get_remote_addr failed\n");
+        fprintf(stderr, "quic.c, quic_setup_path(): quic_get_remote_addr failed\n");
         return -1;
     }
 
@@ -443,7 +407,7 @@ ngtcp2_tstamp quic_timestamp(void) {
     return (ngtcp2_tstamp)ts.tv_sec * NGTCP2_SECONDS + (ngtcp2_tstamp)ts.tv_nsec;
 }
 
-int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_client *client) {
+int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, struct uquic_conn *uc) {
     uint8_t buf[NGTCP2_MAX_CIDLEN];
     size_t cidlen = 8;
     ngtcp2_cid dcid, scid;
@@ -453,14 +417,14 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
     ngtcp2_conn *conn;
 
     if (RAND_bytes(buf, (int)cidlen) != 1) {
-        fprintf(stderr, "client.c, quic_setup_conn(): RAND_bytes (dcid) failed\n");
+        fprintf(stderr, "quic.c, quic_setup_conn(): RAND_bytes (dcid) failed\n");
         return -1;
     }
 
     ngtcp2_cid_init(&dcid, buf, cidlen);
 
     if (RAND_bytes(buf, (int)cidlen) != 1) {
-        fprintf(stderr, "client.c, quic_setup_conn(): RAND_bytes (scid) failed\n");
+        fprintf(stderr, "quic.c, quic_setup_conn(): RAND_bytes (scid) failed\n");
         return -1;
     }
 
@@ -478,18 +442,18 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, q
     params.initial_max_stream_data_bidi_remote = 65536;
     params.initial_max_data = 65536;
 
-    if (ngtcp2_conn_client_new(&conn, &dcid, &scid, &ps->path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &params, NULL, client) != 0) {
-        fprintf(stderr, "client.c, quic_setup_conn(): ngtcp2_conn_client_new failed\n");
+    if (ngtcp2_conn_client_new(&conn, &dcid, &scid, &ps->path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &params, NULL, uc) != 0) {
+        fprintf(stderr, "quic.c, quic_setup_conn(): ngtcp2_conn_client_new failed\n");
         return -1;
     }
 
-    client->conn = conn;
+    uc->conn = conn;
     ngtcp2_conn_set_tls_native_handle(conn, ossl_ctx);
 
     return 0;
 }
 
-int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, quic_server *server, const ngtcp2_pkt_hd *hd) {
+int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, struct uquic_conn *uc, const ngtcp2_pkt_hd *hd) {
     uint8_t buf[NGTCP2_MAX_CIDLEN];
     size_t cidlen = 8;
     ngtcp2_cid scid;
@@ -519,15 +483,13 @@ int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl
     params.original_dcid = hd->dcid;
     params.original_dcid_present = 1;
 
-    if (ngtcp2_conn_server_new(&conn, &hd->scid, &scid, &ps->path, hd->version, &callbacks, &settings, &params, NULL, server) != 0) {
+    if (ngtcp2_conn_server_new(&conn, &hd->scid, &scid, &ps->path, hd->version, &callbacks, &settings, &params, NULL, uc) != 0) {
         fprintf(stderr, "quic.c, quic_setup_server_conn(): ngtcp2_conn_server_new failed\n");
         return -1;
     }
 
-    server->conn = conn;
+    uc->conn = conn;
     ngtcp2_conn_set_tls_native_handle(conn, ossl_ctx);
 
     return 0;
 }
-
-
