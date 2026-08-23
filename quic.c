@@ -142,6 +142,66 @@ static ngtcp2_conn *quic_get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
     return client->conn;
 }
 
+static ngtcp2_conn *quic_server_get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
+    quic_server *server;
+
+    server = conn_ref->user_data;
+
+    return server->conn;
+}
+
+static int quic_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in, unsigned int inlen, void *arg) {
+    (void)ssl;
+    (void)arg;
+
+    if (SSL_select_next_proto((unsigned char **)out, outlen, (const unsigned char *)"\x02h3", 3, in, inlen) != OPENSSL_NPN_NEGOTIATED) {
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+    }
+
+    return SSL_TLSEXT_ERR_OK;
+}
+
+int quic_create_server_ssl_ctx(const char *cert_file, const char *key_file, SSL_CTX **out_ctx) {
+    SSL_CTX *sslctx;
+
+    sslctx = SSL_CTX_new(TLS_server_method());
+
+    if (sslctx == NULL) {
+        fprintf(stderr, "quic.c, quic_create_server_ssl_ctx(): SSL_CTX_new failed\n");
+        ERR_print_errors_fp(stderr);
+        return -1;
+    }
+
+    SSL_CTX_set_min_proto_version(sslctx, TLS1_3_VERSION);
+    SSL_CTX_set_max_proto_version(sslctx, TLS1_3_VERSION);
+    SSL_CTX_set_alpn_select_cb(sslctx, quic_alpn_select_cb, NULL);
+
+    if (SSL_CTX_use_certificate_file(sslctx, cert_file, SSL_FILETYPE_PEM) != 1) {
+        fprintf(stderr, "quic.c, quic_create_server_ssl_ctx(): SSL_CTX_use_certificate_file failed\n");
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(sslctx);
+        return -1;
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(sslctx, key_file, SSL_FILETYPE_PEM) != 1) {
+        fprintf(stderr, "quic.c, quic_create_server_ssl_ctx(): SSL_CTX_use_PrivateKey_file failed\n");
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(sslctx);
+        return -1;
+    }
+
+    if (SSL_CTX_check_private_key(sslctx) != 1) {
+        fprintf(stderr, "quic.c, quic_create_server_ssl_ctx(): SSL_CTX_check_private_key failed\n");
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(sslctx);
+        return -1;
+    }
+
+    *out_ctx = sslctx;
+
+    return 0;
+}
+
 int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx) {
     SSL *ssl;
     int alpnproto, tlshn;
@@ -186,6 +246,41 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
 
     if (ngtcp2_crypto_ossl_ctx_new(&ossl_ctx, ssl) != 0) {
         fprintf(stderr, "client.c, quic_setup_tls_session(): ngtcp2_crypto_ossl_ctx_new failed\n");
+        SSL_free(ssl);
+        return -1;
+    }
+
+    *out_ssl = ssl;
+    *out_ossl_ctx = ossl_ctx;
+
+    return 0;
+}
+
+int quic_setup_server_tls_session(SSL_CTX *ssl_ctx, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx) {
+    SSL *ssl;
+    ngtcp2_crypto_ossl_ctx *ossl_ctx;
+
+    ssl = SSL_new(ssl_ctx);
+
+    if (ssl == NULL) {
+        fprintf(stderr, "quic.c, quic_setup_server_tls_session(): SSL_new failed\n");
+        ERR_print_errors_fp(stderr);
+        return -1;
+    }
+
+    SSL_set_accept_state(ssl);
+
+    conn_ref->get_conn = quic_server_get_conn;
+    SSL_set_app_data(ssl, conn_ref);
+
+    if (ngtcp2_crypto_ossl_configure_server_session(ssl) != 0) {
+        fprintf(stderr, "quic.c, quic_setup_server_tls_session(): ngtcp2_crypto_ossl_configure_server_session failed\n");
+        SSL_free(ssl);
+        return -1;
+    }
+
+    if (ngtcp2_crypto_ossl_ctx_new(&ossl_ctx, ssl) != 0) {
+        fprintf(stderr, "quic.c, quic_setup_server_tls_session(): ngtcp2_crypto_ossl_ctx_new failed\n");
         SSL_free(ssl);
         return -1;
     }
