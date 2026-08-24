@@ -155,7 +155,7 @@ static int uquic_pump(struct uquic_conn *uc) {
             fprintf(stderr, "uquic.c, uquic_pump(): io_uring_get_sqe (recv) returned NULL\n");
             return -1;
         }
-        io_uring_prep_recv(rsqe, uc->sock, uc->rbuf, sizeof(uc->rbuf), 0);
+        io_uring_prep_recv(rsqe, uc->sock, uc->pktbuf, sizeof(uc->pktbuf), 0);
         io_uring_sqe_set_data(rsqe, (void *)(uintptr_t)1);
 
         if (have_timeout) {
@@ -209,7 +209,7 @@ static int uquic_pump(struct uquic_conn *uc) {
 
             now = quic_timestamp();
 
-            if (ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->rbuf, (size_t)recv_res, now) != 0) {
+            if (ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->pktbuf, (size_t)recv_res, now) != 0) {
                 fprintf(stderr, "uquic.c, uquic_pump(): ngtcp2_conn_read_pkt failed\n");
                 return -1;
             }
@@ -321,7 +321,7 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
     fprintf(stderr, "uquic.c, uquic_accept(): server TLS session ready\n");
 
     peer_len = sizeof(peer_addr);
-    n = recvfrom(uc->sock, uc->rbuf, sizeof(uc->rbuf), 0, (struct sockaddr *)&peer_addr, &peer_len);
+    n = recvfrom(uc->sock, uc->pktbuf, sizeof(uc->pktbuf), 0, (struct sockaddr *)&peer_addr, &peer_len);
     if (n < 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): recvfrom(): %s\n", strerror(errno));
         goto fail_ssl;
@@ -337,7 +337,7 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
         goto fail_ssl;
     }
 
-    if (ngtcp2_accept(&hd, uc->rbuf, (size_t)n) != 0) {
+    if (ngtcp2_accept(&hd, uc->pktbuf, (size_t)n) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): ngtcp2_accept failed\n");
         goto fail_ssl;
     }
@@ -346,7 +346,7 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
         goto fail_ssl;
     }
 
-    if (ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->rbuf, (size_t)n, quic_timestamp()) != 0) {
+    if (ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->pktbuf, (size_t)n, quic_timestamp()) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): ngtcp2_conn_read_pkt failed\n");
         goto fail_ssl;
     }
@@ -472,7 +472,7 @@ ssize_t uquic_recv(uquic_conn *conn, int64_t *stream_id, uint8_t *buf, size_t bu
         if (uc->recv_pending) {
             size_t n = uc->recv_len < buflen ? uc->recv_len : buflen;
 
-            memcpy(buf, uc->rbuf, n);
+            memcpy(buf, uc->recv_buf, n);
             if (stream_id != NULL) {
                 *stream_id = uc->recv_stream_id;
             }

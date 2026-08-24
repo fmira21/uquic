@@ -30,12 +30,13 @@ struct uquic_conn {
     struct io_uring ring;
 
     uint8_t sbuf[QUIC_SEND_BATCH][1452];
-    uint8_t rbuf[65536];
+    uint8_t pktbuf[65536];
 
     int recv_pending;
     int64_t recv_stream_id;
     size_t recv_len;
     int recv_fin;
+    uint8_t recv_buf[65536];
 };
 
 int quic_create_socket(const char *host, const char *port);

@@ -385,8 +385,8 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t s
     (void)offset;
     (void)stream_user_data;
 
-    n = datalen < sizeof(uc->rbuf) ? datalen : sizeof(uc->rbuf);
-    memcpy(uc->rbuf, data, n);
+    n = datalen < sizeof(uc->recv_buf) ? datalen : sizeof(uc->recv_buf);
+    memcpy(uc->recv_buf, data, n);
 
     uc->recv_stream_id = stream_id;
     uc->recv_len = n;
