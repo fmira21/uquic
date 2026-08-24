@@ -1,15 +1,20 @@
 #include "uquic.h"
 #include <stdio.h>
+#include <string.h>
 
 int main() {
     uquic_conn *conn;
+    uquic_client_opts opts;
     int64_t stream_id;
     const char ping_msg[] = "ping";
     uint8_t buf[64];
     ssize_t n;
     int fin;
 
-    conn = uquic_connect("127.0.0.1", "4433");
+    memset(&opts, 0, sizeof(opts));
+    opts.insecure_skip_verify = 1;
+
+    conn = uquic_connect("127.0.0.1", "4433", &opts);
     if (conn == NULL) {
         fprintf(stderr, "example_client.c, main(): uquic_connect failed\n");
         return -1;

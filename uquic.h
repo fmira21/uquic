@@ -4,7 +4,13 @@
 
 typedef struct uquic_conn uquic_conn;
 
-uquic_conn *uquic_connect(const char *host, const char *port);
+typedef struct {
+    int insecure_skip_verify;
+    const char *ca_file;
+    const char *server_name;
+} uquic_client_opts;
+
+uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client_opts *opts);
 uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_file, const char *key_file);
 
 int64_t uquic_stream_open(uquic_conn *conn);

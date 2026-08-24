@@ -12,7 +12,7 @@ io_uring layer uses [liburing](https://github.com/axboe/liburing/blob/master/src
 `uquic.h` contains connect/accept/send/recv functions over `uquic_conn`:
 
 ```c
-uquic_conn *uquic_connect(const char *host, const char *port);
+uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client_opts *opts);
 uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_file, const char *key_file);
 int64_t uquic_stream_open(uquic_conn *conn);
 int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t len, int fin);
@@ -23,6 +23,30 @@ int uquic_close(uquic_conn *conn);
 Underlying QUIC functions are covered in `quic.h`
 
 See `example_client.c`/`example_server.c` for usage.
+
+## TLS verification
+
+By default the client verifies the server certificate against the system trust
+store and matches it against `host`. Passing `NULL` as `opts` keeps that default.
+
+```c
+typedef struct {
+    int insecure_skip_verify;
+    const char *ca_file;
+    const char *server_name;
+} uquic_client_opts;
+```
+
+- `ca_file` — trust this PEM bundle instead of the system store.
+- `server_name` — name to send as SNI and to match the certificate against,
+  when it differs from `host`.
+- `insecure_skip_verify` — **accept any certificate from anyone.** This disables
+  MITM protection entirely: the connection is still encrypted, but there is
+  nothing to prove the peer on the other end is the one you meant to reach. Use
+  it for local testing only, never against a real network.
+
+`example_client.c` sets `insecure_skip_verify`, because the self-signed
+`cert.pem` below is not in any trust store and carries no SAN for `127.0.0.1`.
 
 ## Run test Linux environment in Docker
 

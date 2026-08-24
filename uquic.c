@@ -219,8 +219,17 @@ static int uquic_pump(struct uquic_conn *uc) {
     return 0;
 }
 
-uquic_conn *uquic_connect(const char *host, const char *port) {
+uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client_opts *opts) {
     struct uquic_conn *uc;
+    uquic_client_opts defaults;
+    const char *server_name;
+
+    if (opts == NULL) {
+        memset(&defaults, 0, sizeof(defaults));
+        opts = &defaults;
+    }
+
+    server_name = opts->server_name != NULL ? opts->server_name : host;
 
     uc = calloc(1, sizeof(*uc));
     if (uc == NULL) {
@@ -240,11 +249,11 @@ uquic_conn *uquic_connect(const char *host, const char *port) {
         goto fail_sock;
     }
 
-    if (quic_create_ssl_ctx(&uc->ssl_ctx) != 0) {
+    if (quic_create_ssl_ctx(opts->ca_file, opts->insecure_skip_verify, &uc->ssl_ctx) != 0) {
         goto fail_sock;
     }
 
-    if (quic_setup_tls_session(uc->ssl_ctx, host, &uc->conn_ref, &uc->ssl, &uc->ossl_ctx) != 0) {
+    if (quic_setup_tls_session(uc->ssl_ctx, server_name, opts->insecure_skip_verify, &uc->conn_ref, &uc->ssl, &uc->ossl_ctx) != 0) {
         goto fail_ssl_ctx;
     }
 

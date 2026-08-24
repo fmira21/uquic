@@ -115,7 +115,7 @@ int quic_get_remote_addr(int sock, struct sockaddr_storage *out_addr, socklen_t 
     return pn;
 }
 
-int quic_create_ssl_ctx(SSL_CTX **out_ctx) {
+int quic_create_ssl_ctx(const char *ca_file, int insecure, SSL_CTX **out_ctx) {
     SSL_CTX *sslctx;
 
     sslctx = SSL_CTX_new(TLS_client_method());
@@ -128,6 +128,31 @@ int quic_create_ssl_ctx(SSL_CTX **out_ctx) {
 
     SSL_CTX_set_min_proto_version(sslctx, TLS1_3_VERSION);
     SSL_CTX_set_max_proto_version(sslctx, TLS1_3_VERSION);
+
+    if (insecure) {
+        fprintf(stderr, "quic.c, quic_create_ssl_ctx(): certificate verification disabled, connection is not protected against MITM\n");
+        SSL_CTX_set_verify(sslctx, SSL_VERIFY_NONE, NULL);
+
+        *out_ctx = sslctx;
+
+        return 0;
+    }
+
+    SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
+
+    if (ca_file != NULL) {
+        if (SSL_CTX_load_verify_file(sslctx, ca_file) != 1) {
+            fprintf(stderr, "quic.c, quic_create_ssl_ctx(): SSL_CTX_load_verify_file failed for %s\n", ca_file);
+            ERR_print_errors_fp(stderr);
+            SSL_CTX_free(sslctx);
+            return -1;
+        }
+    } else if (SSL_CTX_set_default_verify_paths(sslctx) != 1) {
+        fprintf(stderr, "quic.c, quic_create_ssl_ctx(): SSL_CTX_set_default_verify_paths failed\n");
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(sslctx);
+        return -1;
+    }
 
     *out_ctx = sslctx;
 
@@ -194,7 +219,36 @@ int quic_create_server_ssl_ctx(const char *cert_file, const char *key_file, SSL_
     return 0;
 }
 
-int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx) {
+static int quic_is_ip_literal(const char *name) {
+    struct in_addr v4;
+    struct in6_addr v6;
+
+    return inet_pton(AF_INET, name, &v4) == 1 || inet_pton(AF_INET6, name, &v6) == 1;
+}
+
+static int quic_set_verify_name(SSL *ssl, const char *server_name) {
+    if (quic_is_ip_literal(server_name)) {
+        X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+
+        if (X509_VERIFY_PARAM_set1_ip_asc(param, server_name) != 1) {
+            fprintf(stderr, "quic.c, quic_set_verify_name(): X509_VERIFY_PARAM_set1_ip_asc failed\n");
+            ERR_print_errors_fp(stderr);
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (SSL_set1_host(ssl, server_name) != 1) {
+        fprintf(stderr, "quic.c, quic_set_verify_name(): SSL_set1_host failed\n");
+        ERR_print_errors_fp(stderr);
+        return -1;
+    }
+
+    return 0;
+}
+
+int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *server_name, int insecure, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx) {
     SSL *ssl;
     int alpnproto, tlshn;
     ngtcp2_crypto_ossl_ctx *ossl_ctx;
@@ -218,11 +272,16 @@ int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_con
         return -1;
     }
 
-    tlshn = SSL_set_tlsext_host_name(ssl, host);
+    tlshn = SSL_set_tlsext_host_name(ssl, server_name);
 
     if (tlshn == 0) {
         fprintf(stderr, "quic.c, quic_setup_tls_session(): SSL_set_tlsext_host_name failed\n");
         ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        return -1;
+    }
+
+    if (!insecure && quic_set_verify_name(ssl, server_name) != 0) {
         SSL_free(ssl);
         return -1;
     }

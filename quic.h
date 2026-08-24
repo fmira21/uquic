@@ -1,3 +1,4 @@
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -41,9 +42,9 @@ int quic_create_socket(const char *host, const char *port);
 int quic_create_listen_socket(const char *host, const char *port);
 int quic_get_local_addr (int sock, struct sockaddr_storage *out_addr, socklen_t *out_len);
 int quic_get_remote_addr(int sock, struct sockaddr_storage *out_addr, socklen_t *out_len);
-int quic_create_ssl_ctx(SSL_CTX **out_ctx);
+int quic_create_ssl_ctx(const char *ca_file, int insecure, SSL_CTX **out_ctx);
 int quic_create_server_ssl_ctx(const char *cert_file, const char *key_file, SSL_CTX **out_ctx);
-int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *host, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx);
+int quic_setup_tls_session(SSL_CTX *ssl_ctx, const char *server_name, int insecure, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx);
 int quic_setup_server_tls_session(SSL_CTX *ssl_ctx, ngtcp2_crypto_conn_ref *conn_ref, SSL **out_ssl, ngtcp2_crypto_ossl_ctx **out_ossl_ctx);
 int quic_setup_path(int sock, ngtcp2_path_storage *ps);
 void quic_build_callbacks(ngtcp2_callbacks *callbacks);
