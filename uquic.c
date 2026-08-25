@@ -436,6 +436,15 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
                     return -1;
                 }
             }
+
+            if (offset < len) {
+                if (uquic_pump(uc) != 0) {
+                    fprintf(stderr, "uquic.c, uquic_send(): connection failed with %zu of %zu bytes sent\n", offset, len);
+                    return -1;
+                }
+                continue;
+            }
+
             break;
         }
 

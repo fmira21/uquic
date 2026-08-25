@@ -45,8 +45,7 @@ typedef struct {
   nothing to prove the peer on the other end is the one you meant to reach. Use
   it for local testing only, never against a real network.
 
-`example_client.c` sets `insecure_skip_verify`, because the self-signed
-`cert.pem` below is not in any trust store and carries no SAN for `127.0.0.1`.
+`example_client.c` sets `insecure_skip_verify`, because the self-signed `cert.pem` generated in the section below is not in any trust store and carries no SAN for `127.0.0.1`.
 
 ## Run test Linux environment in Docker
 

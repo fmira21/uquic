@@ -381,9 +381,11 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t s
     struct uquic_conn *uc = user_data;
     size_t n;
 
-    (void)conn;
     (void)offset;
     (void)stream_user_data;
+
+    ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+    ngtcp2_conn_extend_max_offset(conn, datalen);
 
     n = datalen < sizeof(uc->recv_buf) ? datalen : sizeof(uc->recv_buf);
     memcpy(uc->recv_buf, data, n);
@@ -500,6 +502,7 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, s
     params.initial_max_stream_data_bidi_local = 65536;
     params.initial_max_stream_data_bidi_remote = 65536;
     params.initial_max_data = 65536;
+    params.max_idle_timeout = 30 * NGTCP2_SECONDS;
 
     if (ngtcp2_conn_client_new(&conn, &dcid, &scid, &ps->path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &params, NULL, uc) != 0) {
         fprintf(stderr, "quic.c, quic_setup_conn(): ngtcp2_conn_client_new failed\n");
@@ -539,6 +542,7 @@ int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl
     params.initial_max_stream_data_bidi_local = 65536;
     params.initial_max_stream_data_bidi_remote = 65536;
     params.initial_max_data = 65536;
+    params.max_idle_timeout = 30 * NGTCP2_SECONDS;
     params.original_dcid = hd->dcid;
     params.original_dcid_present = 1;
 
