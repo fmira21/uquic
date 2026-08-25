@@ -58,10 +58,14 @@ int quic_create_listen_socket(const char *host, const char *port) {
     }
 
     for (rp = res; rp != NULL; rp = rp->ai_next) {
+        int on = 1;
+
         s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (s == -1) {
             continue;
         }
+
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
         if (bind(s, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;
