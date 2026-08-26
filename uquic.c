@@ -241,29 +241,34 @@ uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client
 
     uc->sock = quic_create_socket(host, port);
     if (uc->sock < 0) {
-        free(uc);
+        uquic_teardown(uc, 0);
         return NULL;
     }
 
     if (quic_setup_path(uc->sock, &uc->ps) != 0) {
-        goto fail_sock;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (quic_create_ssl_ctx(opts->ca_file, opts->insecure_skip_verify, &uc->ssl_ctx) != 0) {
-        goto fail_sock;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (quic_setup_tls_session(uc->ssl_ctx, server_name, opts->insecure_skip_verify, &uc->conn_ref, &uc->ssl, &uc->ossl_ctx) != 0) {
-        goto fail_ssl_ctx;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (quic_setup_conn(&uc->ps, uc->ossl_ctx, uc) != 0) {
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (io_uring_queue_init(16, &uc->ring, 0) != 0) {
         fprintf(stderr, "uquic.c, uquic_connect(): io_uring_queue_init failed\n");
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     while (!uc->handshake_done) {
@@ -274,16 +279,6 @@ uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client
     }
 
     return uc;
-
-fail_ssl:
-    ngtcp2_crypto_ossl_ctx_del(uc->ossl_ctx);
-    SSL_free(uc->ssl);
-fail_ssl_ctx:
-    SSL_CTX_free(uc->ssl_ctx);
-fail_sock:
-    close(uc->sock);
-    free(uc);
-    return NULL;
 }
 
 uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_file, const char *key_file) {
@@ -304,18 +299,20 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
     uc->sock = quic_create_listen_socket(host, port);
     if (uc->sock < 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): quic_create_listen_socket failed\n");
-        free(uc);
+        uquic_teardown(uc, 0);
         return NULL;
     }
 
     fprintf(stderr, "uquic.c, uquic_accept(): listening on %s:%s\n", host, port);
 
     if (quic_create_server_ssl_ctx(cert_file, key_file, &uc->ssl_ctx) != 0) {
-        goto fail_sock;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (quic_setup_server_tls_session(uc->ssl_ctx, &uc->conn_ref, &uc->ssl, &uc->ossl_ctx) != 0) {
-        goto fail_ssl_ctx;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     fprintf(stderr, "uquic.c, uquic_accept(): server TLS session ready\n");
@@ -324,38 +321,45 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
     n = recvfrom(uc->sock, uc->pktbuf, sizeof(uc->pktbuf), 0, (struct sockaddr *)&peer_addr, &peer_len);
     if (n < 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): recvfrom(): %s\n", strerror(errno));
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (connect(uc->sock, (struct sockaddr *)&peer_addr, peer_len) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): connect(): %s\n", strerror(errno));
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (quic_setup_path(uc->sock, &uc->ps) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): quic_setup_path failed\n");
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (ngtcp2_accept(&hd, uc->pktbuf, (size_t)n) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): ngtcp2_accept failed\n");
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (quic_setup_server_conn(&uc->ps, uc->ossl_ctx, uc, &hd) != 0) {
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     if (ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->pktbuf, (size_t)n, quic_timestamp()) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): ngtcp2_conn_read_pkt failed\n");
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     fprintf(stderr, "uquic.c, uquic_accept(): first Initial packet accepted, connection established\n");
 
     if (io_uring_queue_init(16, &uc->ring, 0) != 0) {
         fprintf(stderr, "uquic.c, uquic_accept(): io_uring_queue_init failed\n");
-        goto fail_ssl;
+        uquic_teardown(uc, 0);
+        return NULL;
     }
 
     while (!uc->handshake_done) {
@@ -366,16 +370,6 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
     }
 
     return uc;
-
-fail_ssl:
-    ngtcp2_crypto_ossl_ctx_del(uc->ossl_ctx);
-    SSL_free(uc->ssl);
-fail_ssl_ctx:
-    SSL_CTX_free(uc->ssl_ctx);
-fail_sock:
-    close(uc->sock);
-    free(uc);
-    return NULL;
 }
 
 int64_t uquic_stream_open(uquic_conn *conn) {
