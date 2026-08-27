@@ -24,6 +24,20 @@ Underlying QUIC functions are covered in `quic.h`
 
 See `example_client.c`/`example_server.c` for usage.
 
+## Closing
+
+`uquic_close` closes gracefully.
+It first waits for the peer to acknowledge everything passed to `uquic_send`,
+because a QUIC CONNECTION_CLOSE discards whatever is still in flight. It then
+sends CONNECTION_CLOSE and stays in the closing period, answering any further
+incoming packet with that same terminal packet, before releasing the socket; otherwise the peer's next datagram bounces back as ICMP port-unreachable and it
+sees `ECONNREFUSED` instead of the data it was waiting for.
+
+Both waits are bounded by 3×PTO, so closing a peer that has already gone away
+costs a few tens of milliseconds rather than blocking. `uquic_close` returns `-1`
+if it gave up with data still unacknowledged, `0` otherwise. It always releases
+the connection, whatever it returns.
+
 ## TLS verification
 
 By default the client verifies the server certificate against the system trust

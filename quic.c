@@ -407,6 +407,19 @@ static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t s
     return 0;
 }
 
+static int quic_acked_stream_data_offset_cb(ngtcp2_conn *conn, int64_t stream_id, uint64_t offset, uint64_t datalen, void *user_data, void *stream_user_data) {
+    struct uquic_conn *uc = user_data;
+
+    (void)conn;
+    (void)stream_id;
+    (void)offset;
+    (void)stream_user_data;
+
+    uc->tx_acked += datalen;
+
+    return 0;
+}
+
 void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     memset(callbacks, 0, sizeof(*callbacks));
 
@@ -425,6 +438,7 @@ void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
     callbacks->handshake_completed = quic_handshake_completed_cb;
     callbacks->recv_stream_data = quic_recv_stream_data_cb;
+    callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
 }
 
 void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
@@ -443,6 +457,7 @@ void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
     callbacks->handshake_completed = quic_handshake_completed_cb;
     callbacks->recv_stream_data = quic_recv_stream_data_cb;
+    callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
 }
 
 int quic_setup_path(int sock, ngtcp2_path_storage *ps) {

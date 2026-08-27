@@ -1,7 +1,6 @@
 #include "uquic.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 int main(int argc, char **argv) {
     uquic_conn *conn;
@@ -45,7 +44,6 @@ int main(int argc, char **argv) {
 
     if (sid >= 0) {
         uquic_send(conn, sid, (const uint8_t *)"done", 4, 1);
-        usleep(200000);
     }
 
     uquic_close(conn);

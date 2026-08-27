@@ -9,7 +9,6 @@ TMP=$(mktemp -d)
 trap 'stop_server; rm -rf "$TMP"' EXIT
 
 ROUNDS=${ROUNDS:-5}
-MAX_RETRY=${MAX_RETRY:-3}
 
 CLIENT_EXPECT="received 4 bytes: pong"
 SERVER_EXPECT="received 4 bytes on stream 0: ping"
@@ -36,22 +35,10 @@ run_once() {
 
 round=1
 while [ "$round" -le "$ROUNDS" ]; do
-    attempt=0
+    run_once
+    rc=$?
 
-    while : ; do
-        run_once
-        rc=$?
-
-        if [ "$rc" -eq 0 ]; then
-            break
-        fi
-
-        if [ "$rc" -eq 1 ] && grep -q ECONNREFUSED "$TMP/c.log" 2>/dev/null && [ "$attempt" -lt "$MAX_RETRY" ]; then
-            attempt=$((attempt + 1))
-            note "round $round: known ECONNREFUSED close race, retry $attempt/$MAX_RETRY"
-            continue
-        fi
-
+    if [ "$rc" -ne 0 ]; then
         cat "$TMP/c.log" >&2
         cat "$TMP/s.log" >&2
 
@@ -62,7 +49,7 @@ while [ "$round" -le "$ROUNDS" ]; do
         fi
 
         exit "$TESTS_FAILED"
-    done
+    fi
 
     round=$((round + 1))
 done
