@@ -13,6 +13,15 @@ static int quic_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe_out) {
     }
 }
 
+static int uquic_rand_failed(struct uquic_conn *uc, const char *tag) {
+    if (uc->rand_failed) {
+        fprintf(stderr, "%s: RNG failure reported by quic_rand_cb, aborting connection\n", tag);
+        return 1;
+    }
+
+    return 0;
+}
+
 static int quic_flush_sends(struct io_uring *ring, size_t count, const char *tag) {
     struct io_uring_cqe *cqe;
     size_t i;
@@ -214,6 +223,10 @@ static int uquic_pump(struct uquic_conn *uc) {
                 return -1;
             }
         }
+    }
+
+    if (uquic_rand_failed(uc, "uquic.c, uquic_pump()")) {
+        return -1;
     }
 
     return 0;
@@ -463,6 +476,10 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
                 return -1;
             }
         }
+    }
+
+    if (uquic_rand_failed(uc, "uquic.c, uquic_send()")) {
+        return -1;
     }
 
     return 0;

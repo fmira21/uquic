@@ -347,9 +347,14 @@ int quic_setup_server_tls_session(SSL_CTX *ssl_ctx, ngtcp2_crypto_conn_ref *conn
 }
 
 static void quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx) {
-    (void)rand_ctx;
+    struct uquic_conn *uc = rand_ctx->native_handle;
 
-    RAND_bytes(dest, (int)destlen);
+    if (RAND_bytes(dest, (int)destlen) != 1) {
+        fprintf(stderr, "quic.c, quic_rand_cb(): RAND_bytes failed\n");
+        if (uc != NULL) {
+            uc->rand_failed = 1;
+        }
+    }
 }
 
 static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, ngtcp2_stateless_reset_token *token, size_t cidlen, void *user_data) {
@@ -499,6 +504,7 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, s
 
     ngtcp2_settings_default(&settings);
     settings.initial_ts = quic_timestamp();
+    settings.rand_ctx.native_handle = uc;
 
     ngtcp2_transport_params_default(&params);
     params.initial_max_streams_uni = 3;
@@ -539,6 +545,7 @@ int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl
 
     ngtcp2_settings_default(&settings);
     settings.initial_ts = quic_timestamp();
+    settings.rand_ctx.native_handle = uc;
 
     ngtcp2_transport_params_default(&params);
     params.initial_max_streams_uni = 3;

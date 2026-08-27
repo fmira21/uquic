@@ -20,6 +20,7 @@ struct uquic_conn {
     ngtcp2_crypto_conn_ref conn_ref;
     ngtcp2_conn *conn;
     int handshake_done;
+    int rand_failed;
 
     int sock;
     SSL_CTX *ssl_ctx;
