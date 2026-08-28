@@ -1,5 +1,8 @@
 *.o
 *.d
+core
+core.*
+vgcore.*
 example_client
 example_server
 *.pem
