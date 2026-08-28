@@ -145,3 +145,11 @@ The QUIC server (`example_server.c`) needs `cert.pem`/`key.pem` in the repo root
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=uquic-test"
 ```
+
+## Roadmap
+
+- [ ] **Address validation.** Now the server answers any Initial packet without proving the client's address first.
+- [ ] **Error reporting.** Error codes instead of the library writes to stderr -1 returns.
+- [ ] **Non-blocking mode.** Expose the ring or a descriptor so a caller's own event loop can drive uquic. This is also what would remove the full-duplex deadlock described under [Receiving](#receiving).
+- [ ] **More than one stream per connection**, and a smaller per-connection footprint.
+- [ ]  **Library harness.**
