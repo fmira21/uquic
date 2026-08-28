@@ -152,4 +152,4 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
 - [ ] **Error reporting.** Error codes instead of the library writes to stderr and `-1` returns.
 - [ ] **Non-blocking mode.** Expose the ring or a descriptor so a caller's own event loop can drive uquic. This is also what would remove the full-duplex deadlock described under [Receiving](#receiving).
 - [ ] **More than one stream per connection**, and a smaller per-connection footprint.
-- [ ]  **Library harness.**
+- [ ] **Library harness.**
