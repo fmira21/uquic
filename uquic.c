@@ -55,9 +55,32 @@ static int quic_flush_sends(struct io_uring *ring, size_t count, const char *tag
     return 0;
 }
 
+static void uquic_prep_send(struct uquic_conn *uc, struct io_uring_sqe *sqe, const uint8_t *buf, size_t len) {
+    if (uc->listener != NULL) {
+        io_uring_prep_sendto(sqe, uc->sock, buf, len, 0, uc->ps.path.remote.addr, uc->ps.path.remote.addrlen);
+        return;
+    }
+
+    io_uring_prep_send(sqe, uc->sock, buf, len, 0);
+}
+
+static void uquic_listener_drop(struct uquic_listener *l, struct uquic_conn *uc) {
+    size_t i;
+
+    for (i = 0; i < l->nconns; i++) {
+        if (l->conns[i] == uc) {
+            l->conns[i] = l->conns[l->nconns - 1];
+            l->nconns--;
+            return;
+        }
+    }
+}
+
 static void uquic_teardown(struct uquic_conn *uc, int ring_ready) {
-    if (ring_ready) {
-        io_uring_queue_exit(&uc->ring);
+    if (uc->listener != NULL) {
+        uquic_listener_drop(uc->listener, uc);
+    } else if (ring_ready) {
+        io_uring_queue_exit(&uc->own_ring);
     }
     if (uc->conn) {
         ngtcp2_conn_del(uc->conn);
@@ -68,11 +91,13 @@ static void uquic_teardown(struct uquic_conn *uc, int ring_ready) {
     if (uc->ssl) {
         SSL_free(uc->ssl);
     }
-    if (uc->ssl_ctx) {
-        SSL_CTX_free(uc->ssl_ctx);
-    }
-    if (uc->sock >= 0) {
-        close(uc->sock);
+    if (uc->listener == NULL) {
+        if (uc->ssl_ctx) {
+            SSL_CTX_free(uc->ssl_ctx);
+        }
+        if (uc->sock >= 0) {
+            close(uc->sock);
+        }
     }
     free(uc);
 }
@@ -82,27 +107,24 @@ static void uquic_teardown(struct uquic_conn *uc, int ring_ready) {
  * data up to the current retransmit-timer deadline via a linked io_uring
  * timeout, and process one incoming packet if it arrived in time.
  * Returns 0 (keep going), 1 (peer gone, ECONNREFUSED), or -1 (fatal). */
-static int uquic_pump(struct uquic_conn *uc) {
-    ngtcp2_tstamp now, expiry, diff;
-    int timeout_ms;
+static int uquic_conn_flush(struct uquic_conn *uc) {
     size_t send_pending = 0;
 
     for (;;) {
         ngtcp2_ssize datalen, wlen;
         struct io_uring_sqe *sqe;
-
-        now = quic_timestamp();
+        ngtcp2_tstamp now = quic_timestamp();
 
         wlen = ngtcp2_conn_writev_stream(uc->conn, &uc->ps.path, &uc->pi, uc->sbuf[send_pending], sizeof(uc->sbuf[send_pending]), &datalen, 0, -1, NULL, 0, now);
 
         if (wlen < 0) {
-            fprintf(stderr, "uquic.c, uquic_pump(): ngtcp2_conn_writev_stream failed\n");
+            fprintf(stderr, "uquic.c, uquic_conn_flush(): ngtcp2_conn_writev_stream failed\n");
             return -1;
         }
 
         if (wlen == 0) {
             if (send_pending > 0) {
-                int fr = quic_flush_sends(&uc->ring, send_pending, "uquic.c, uquic_pump()");
+                int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_conn_flush()");
 
                 send_pending = 0;
 
@@ -110,19 +132,20 @@ static int uquic_pump(struct uquic_conn *uc) {
                     return fr;
                 }
             }
-            break;
+
+            return 0;
         }
 
-        sqe = io_uring_get_sqe(&uc->ring);
+        sqe = io_uring_get_sqe(uc->ring);
         if (sqe == NULL) {
-            fprintf(stderr, "uquic.c, uquic_pump(): io_uring_get_sqe (send) returned NULL\n");
+            fprintf(stderr, "uquic.c, uquic_conn_flush(): io_uring_get_sqe (send) returned NULL\n");
             return -1;
         }
-        io_uring_prep_send(sqe, uc->sock, uc->sbuf[send_pending], (size_t)wlen, 0);
+        uquic_prep_send(uc, sqe, uc->sbuf[send_pending], (size_t)wlen);
         send_pending++;
 
         if (send_pending == QUIC_SEND_BATCH) {
-            int fr = quic_flush_sends(&uc->ring, send_pending, "uquic.c, uquic_pump()");
+            int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_conn_flush()");
 
             send_pending = 0;
 
@@ -130,6 +153,17 @@ static int uquic_pump(struct uquic_conn *uc) {
                 return fr;
             }
         }
+    }
+}
+
+static int uquic_pump(struct uquic_conn *uc) {
+    ngtcp2_tstamp now, expiry, diff;
+    int timeout_ms;
+    int fr;
+
+    fr = uquic_conn_flush(uc);
+    if (fr != 0) {
+        return fr;
     }
 
     now = quic_timestamp();
@@ -160,7 +194,7 @@ static int uquic_pump(struct uquic_conn *uc) {
         int pending = 1;
         int rv;
 
-        rsqe = io_uring_get_sqe(&uc->ring);
+        rsqe = io_uring_get_sqe(uc->ring);
         if (rsqe == NULL) {
             fprintf(stderr, "uquic.c, uquic_pump(): io_uring_get_sqe (recv) returned NULL\n");
             return -1;
@@ -175,7 +209,7 @@ static int uquic_pump(struct uquic_conn *uc) {
             ts.tv_sec = timeout_ms / 1000;
             ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
 
-            tsqe = io_uring_get_sqe(&uc->ring);
+            tsqe = io_uring_get_sqe(uc->ring);
             if (tsqe == NULL) {
                 fprintf(stderr, "uquic.c, uquic_pump(): io_uring_get_sqe (timeout) returned NULL\n");
                 return -1;
@@ -185,7 +219,7 @@ static int uquic_pump(struct uquic_conn *uc) {
             pending = 2;
         }
 
-        if (io_uring_submit(&uc->ring) < 0) {
+        if (io_uring_submit(uc->ring) < 0) {
             fprintf(stderr, "uquic.c, uquic_pump(): io_uring_submit (recv) failed\n");
             return -1;
         }
@@ -193,7 +227,7 @@ static int uquic_pump(struct uquic_conn *uc) {
         while (pending > 0) {
             struct io_uring_cqe *cqe;
 
-            if (quic_wait_cqe(&uc->ring, &cqe) < 0) {
+            if (quic_wait_cqe(uc->ring, &cqe) < 0) {
                 fprintf(stderr, "uquic.c, uquic_pump(): io_uring_wait_cqe (recv) failed\n");
                 return -1;
             }
@@ -203,7 +237,7 @@ static int uquic_pump(struct uquic_conn *uc) {
                 got_recv = 1;
             }
 
-            io_uring_cqe_seen(&uc->ring, cqe);
+            io_uring_cqe_seen(uc->ring, cqe);
             pending--;
         }
 
@@ -235,6 +269,286 @@ static int uquic_pump(struct uquic_conn *uc) {
     }
 
     if (uquic_rand_failed(uc, "uquic.c, uquic_pump()")) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static struct uquic_conn *uquic_listener_find(struct uquic_listener *l, const uint8_t *dcid, size_t dcidlen) {
+    size_t i, j;
+
+    for (i = 0; i < l->nconns; i++) {
+        struct uquic_conn *uc = l->conns[i];
+
+        for (j = 0; j < uc->ncids; j++) {
+            if (uc->cids[j].datalen == dcidlen && memcmp(uc->cids[j].data, dcid, dcidlen) == 0) {
+                return uc;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static struct uquic_conn *uquic_conn_accept_new(struct uquic_listener *l, const ngtcp2_pkt_hd *hd) {
+    struct uquic_conn *uc;
+
+    if (l->nconns == QUIC_MAX_CONNS) {
+        fprintf(stderr, "uquic.c, uquic_conn_accept_new(): connection table full, dropping new connection\n");
+        return NULL;
+    }
+
+    uc = calloc(1, sizeof(*uc));
+    if (uc == NULL) {
+        fprintf(stderr, "uquic.c, uquic_conn_accept_new(): calloc failed\n");
+        return NULL;
+    }
+
+    uc->listener = l;
+    uc->sock = l->sock;
+    uc->ring = &l->ring;
+    uc->ssl_ctx = l->ssl_ctx;
+    uc->recv_stream_id = -1;
+    uc->conn_ref.user_data = uc;
+
+    quic_setup_path_addrs(&uc->ps, (struct sockaddr *)&l->local_addr, l->local_len, (struct sockaddr *)&l->peer_addr, l->peer_len);
+
+    if (quic_setup_server_tls_session(l->ssl_ctx, &uc->conn_ref, &uc->ssl, &uc->ossl_ctx) != 0) {
+        uquic_teardown(uc, 0);
+        return NULL;
+    }
+
+    if (quic_setup_server_conn(&uc->ps, uc->ossl_ctx, uc, hd) != 0) {
+        uquic_teardown(uc, 0);
+        return NULL;
+    }
+
+    if (quic_conn_add_cid(uc, &hd->dcid) != 0) {
+        uquic_teardown(uc, 0);
+        return NULL;
+    }
+
+    l->conns[l->nconns++] = uc;
+
+    return uc;
+}
+
+static void uquic_conn_resend_close(struct uquic_conn *uc) {
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe;
+
+    if (uc->close_len == 0) {
+        return;
+    }
+
+    sqe = io_uring_get_sqe(uc->ring);
+    if (sqe == NULL) {
+        return;
+    }
+
+    uquic_prep_send(uc, sqe, uc->sbuf[0], uc->close_len);
+
+    if (io_uring_submit(uc->ring) < 0 || quic_wait_cqe(uc->ring, &cqe) < 0) {
+        return;
+    }
+
+    io_uring_cqe_seen(uc->ring, cqe);
+}
+
+static void uquic_listener_route(struct uquic_listener *l, size_t pktlen) {
+    ngtcp2_version_cid vc;
+    struct uquic_conn *uc;
+    ngtcp2_pkt_hd hd;
+    int rv;
+
+    if (ngtcp2_pkt_decode_version_cid(&vc, l->pktbuf, pktlen, QUIC_CIDLEN) != 0) {
+        return;
+    }
+
+    uc = uquic_listener_find(l, vc.dcid, vc.dcidlen);
+
+    if (uc == NULL) {
+        if (ngtcp2_accept(&hd, l->pktbuf, pktlen) != 0) {
+            return;
+        }
+
+        uc = uquic_conn_accept_new(l, &hd);
+
+        if (uc == NULL) {
+            return;
+        }
+    }
+
+    if (uc->closing) {
+        uquic_conn_resend_close(uc);
+        return;
+    }
+
+    rv = ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, l->pktbuf, pktlen, quic_timestamp());
+
+    if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) {
+        uc->peer_closed = 1;
+        return;
+    }
+
+    if (rv != 0) {
+        fprintf(stderr, "uquic.c, uquic_listener_route(): ngtcp2_conn_read_pkt failed\n");
+        uc->failed = 1;
+    }
+}
+
+static int uquic_listener_pump(struct uquic_listener *l, int max_wait_ms) {
+    struct io_uring_sqe *rsqe;
+    struct __kernel_timespec ts;
+    struct msghdr msg;
+    struct iovec iov;
+    ngtcp2_tstamp now, min_expiry = UINT64_MAX;
+    size_t i;
+    int timeout_ms;
+    int recv_res = 0;
+    int got_recv = 0;
+    int pending = 1;
+
+    for (i = 0; i < l->nconns; i++) {
+        struct uquic_conn *uc = l->conns[i];
+        ngtcp2_tstamp expiry;
+
+        if (uc->failed || uc->closing) {
+            continue;
+        }
+
+        now = quic_timestamp();
+        expiry = ngtcp2_conn_get_expiry(uc->conn);
+
+        if (expiry <= now && ngtcp2_conn_handle_expiry(uc->conn, now) != 0) {
+            fprintf(stderr, "uquic.c, uquic_listener_pump(): ngtcp2_conn_handle_expiry failed\n");
+            uc->failed = 1;
+            continue;
+        }
+
+        if (uquic_conn_flush(uc) != 0) {
+            uc->failed = 1;
+            continue;
+        }
+
+        if (uquic_rand_failed(uc, "uquic.c, uquic_listener_pump()")) {
+            uc->failed = 1;
+            continue;
+        }
+
+        expiry = ngtcp2_conn_get_expiry(uc->conn);
+
+        if (expiry < min_expiry) {
+            min_expiry = expiry;
+        }
+    }
+
+    now = quic_timestamp();
+
+    if (min_expiry == UINT64_MAX) {
+        timeout_ms = max_wait_ms;
+    } else {
+        ngtcp2_duration diff = min_expiry > now ? min_expiry - now : 0;
+
+        timeout_ms = (int)((diff + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS);
+
+        if (max_wait_ms >= 0 && max_wait_ms < timeout_ms) {
+            timeout_ms = max_wait_ms;
+        }
+    }
+
+    memset(&msg, 0, sizeof(msg));
+    iov.iov_base = l->pktbuf;
+    iov.iov_len = sizeof(l->pktbuf);
+    msg.msg_name = &l->peer_addr;
+    msg.msg_namelen = sizeof(l->peer_addr);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    rsqe = io_uring_get_sqe(&l->ring);
+    if (rsqe == NULL) {
+        fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_get_sqe (recvmsg) returned NULL\n");
+        return -1;
+    }
+    io_uring_prep_recvmsg(rsqe, l->sock, &msg, 0);
+    io_uring_sqe_set_data(rsqe, (void *)(uintptr_t)1);
+
+    if (timeout_ms >= 0) {
+        struct io_uring_sqe *tsqe;
+
+        rsqe->flags |= IOSQE_IO_LINK;
+        ts.tv_sec = timeout_ms / 1000;
+        ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
+
+        tsqe = io_uring_get_sqe(&l->ring);
+        if (tsqe == NULL) {
+            fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_get_sqe (timeout) returned NULL\n");
+            return -1;
+        }
+        io_uring_prep_link_timeout(tsqe, &ts, 0);
+        io_uring_sqe_set_data(tsqe, (void *)(uintptr_t)2);
+        pending = 2;
+    }
+
+    if (io_uring_submit(&l->ring) < 0) {
+        fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_submit (recvmsg) failed\n");
+        return -1;
+    }
+
+    while (pending > 0) {
+        struct io_uring_cqe *cqe;
+
+        if (quic_wait_cqe(&l->ring, &cqe) < 0) {
+            fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_wait_cqe failed\n");
+            return -1;
+        }
+
+        if ((uintptr_t)io_uring_cqe_get_data(cqe) == 1) {
+            recv_res = cqe->res;
+            got_recv = 1;
+        }
+
+        io_uring_cqe_seen(&l->ring, cqe);
+        pending--;
+    }
+
+    if (!got_recv || recv_res == -ECANCELED) {
+        return 0;
+    }
+
+    if (recv_res < 0) {
+        if (-recv_res == ECONNREFUSED) {
+            return 0;
+        }
+        fprintf(stderr, "uquic.c, uquic_listener_pump(): recvmsg(): %s\n", strerror(-recv_res));
+        return -1;
+    }
+
+    l->peer_len = msg.msg_namelen;
+    uquic_listener_route(l, (size_t)recv_res);
+
+    return 1;
+}
+
+static int uquic_conn_progress(struct uquic_conn *uc) {
+    int rv;
+
+    if (uc->listener == NULL) {
+        return uquic_pump(uc);
+    }
+
+    rv = uquic_listener_pump(uc->listener, -1);
+
+    if (rv < 0) {
+        return -1;
+    }
+
+    if (uc->peer_closed) {
+        return 1;
+    }
+
+    if (uc->failed) {
         return -1;
     }
 
@@ -288,11 +602,13 @@ uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client
         return NULL;
     }
 
-    if (io_uring_queue_init(16, &uc->ring, 0) != 0) {
+    if (io_uring_queue_init(16, &uc->own_ring, 0) != 0) {
         fprintf(stderr, "uquic.c, uquic_connect(): io_uring_queue_init failed\n");
         uquic_teardown(uc, 0);
         return NULL;
     }
+
+    uc->ring = &uc->own_ring;
 
     while (!uc->handshake_done) {
         if (uquic_pump(uc) != 0) {
@@ -304,96 +620,125 @@ uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client
     return uc;
 }
 
-uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_file, const char *key_file) {
-    struct uquic_conn *uc;
-    struct sockaddr_storage peer_addr;
-    socklen_t peer_len;
-    ssize_t n;
-    ngtcp2_pkt_hd hd;
+uquic_listener *uquic_listen(const char *host, const char *port, const char *cert_file, const char *key_file) {
+    struct uquic_listener *l;
 
-    uc = calloc(1, sizeof(*uc));
-    if (uc == NULL) {
-        fprintf(stderr, "uquic.c, uquic_accept(): calloc failed\n");
-        return NULL;
-    }
-    uc->sock = -1;
-    uc->recv_stream_id = -1;
-    uc->conn_ref.user_data = uc;
-
-    uc->sock = quic_create_listen_socket(host, port);
-    if (uc->sock < 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): quic_create_listen_socket failed\n");
-        uquic_teardown(uc, 0);
+    l = calloc(1, sizeof(*l));
+    if (l == NULL) {
+        fprintf(stderr, "uquic.c, uquic_listen(): calloc failed\n");
         return NULL;
     }
 
-    fprintf(stderr, "uquic.c, uquic_accept(): listening on %s:%s\n", host, port);
-
-    if (quic_create_server_ssl_ctx(cert_file, key_file, &uc->ssl_ctx) != 0) {
-        uquic_teardown(uc, 0);
+    l->sock = quic_create_listen_socket(host, port);
+    if (l->sock < 0) {
+        fprintf(stderr, "uquic.c, uquic_listen(): quic_create_listen_socket failed\n");
+        free(l);
         return NULL;
     }
 
-    if (quic_setup_server_tls_session(uc->ssl_ctx, &uc->conn_ref, &uc->ssl, &uc->ossl_ctx) != 0) {
-        uquic_teardown(uc, 0);
+    if (quic_get_local_addr(l->sock, &l->local_addr, &l->local_len) != 0) {
+        close(l->sock);
+        free(l);
         return NULL;
     }
 
-    fprintf(stderr, "uquic.c, uquic_accept(): server TLS session ready\n");
-
-    peer_len = sizeof(peer_addr);
-    n = recvfrom(uc->sock, uc->pktbuf, sizeof(uc->pktbuf), 0, (struct sockaddr *)&peer_addr, &peer_len);
-    if (n < 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): recvfrom(): %s\n", strerror(errno));
-        uquic_teardown(uc, 0);
+    if (quic_create_server_ssl_ctx(cert_file, key_file, &l->ssl_ctx) != 0) {
+        close(l->sock);
+        free(l);
         return NULL;
     }
 
-    if (connect(uc->sock, (struct sockaddr *)&peer_addr, peer_len) != 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): connect(): %s\n", strerror(errno));
-        uquic_teardown(uc, 0);
+    if (io_uring_queue_init(64, &l->ring, 0) != 0) {
+        fprintf(stderr, "uquic.c, uquic_listen(): io_uring_queue_init failed\n");
+        SSL_CTX_free(l->ssl_ctx);
+        close(l->sock);
+        free(l);
         return NULL;
     }
 
-    if (quic_setup_path(uc->sock, &uc->ps) != 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): quic_setup_path failed\n");
-        uquic_teardown(uc, 0);
-        return NULL;
+    fprintf(stderr, "uquic.c, uquic_listen(): listening on %s:%s\n", host, port);
+
+    return l;
+}
+
+void uquic_listener_close(uquic_listener *listener) {
+    struct uquic_listener *l = listener;
+
+    while (l->nconns > 0) {
+        uquic_teardown(l->conns[0], 0);
     }
 
-    if (ngtcp2_accept(&hd, uc->pktbuf, (size_t)n) != 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): ngtcp2_accept failed\n");
-        uquic_teardown(uc, 0);
-        return NULL;
-    }
+    io_uring_queue_exit(&l->ring);
+    SSL_CTX_free(l->ssl_ctx);
+    close(l->sock);
+    free(l);
+}
 
-    if (quic_setup_server_conn(&uc->ps, uc->ossl_ctx, uc, &hd) != 0) {
-        uquic_teardown(uc, 0);
-        return NULL;
-    }
+uquic_conn *uquic_accept(uquic_listener *listener) {
+    struct uquic_listener *l = listener;
 
-    if (ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->pktbuf, (size_t)n, quic_timestamp()) != 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): ngtcp2_conn_read_pkt failed\n");
-        uquic_teardown(uc, 0);
-        return NULL;
-    }
+    for (;;) {
+        size_t i;
 
-    fprintf(stderr, "uquic.c, uquic_accept(): first Initial packet accepted, connection established\n");
+        for (i = 0; i < l->nconns; i++) {
+            struct uquic_conn *uc = l->conns[i];
 
-    if (io_uring_queue_init(16, &uc->ring, 0) != 0) {
-        fprintf(stderr, "uquic.c, uquic_accept(): io_uring_queue_init failed\n");
-        uquic_teardown(uc, 0);
-        return NULL;
-    }
+            if (uc->accepted) {
+                continue;
+            }
 
-    while (!uc->handshake_done) {
-        if (uquic_pump(uc) != 0) {
-            uquic_teardown(uc, 1);
+            if (uc->handshake_done) {
+                uc->accepted = 1;
+                fprintf(stderr, "uquic.c, uquic_accept(): connection established\n");
+                return uc;
+            }
+
+            if (uc->failed || uc->peer_closed) {
+                uquic_teardown(uc, 0);
+                i--;
+            }
+        }
+
+        if (uquic_listener_pump(l, -1) < 0) {
             return NULL;
         }
     }
+}
 
-    return uc;
+uquic_conn *uquic_next(uquic_listener *listener, int timeout_ms) {
+    struct uquic_listener *l = listener;
+    ngtcp2_tstamp deadline = timeout_ms >= 0 ? quic_timestamp() + (ngtcp2_duration)timeout_ms * NGTCP2_MILLISECONDS : UINT64_MAX;
+
+    for (;;) {
+        ngtcp2_tstamp now;
+        int wait_ms = -1;
+        size_t i;
+
+        for (i = 0; i < l->nconns; i++) {
+            struct uquic_conn *uc = l->conns[i];
+
+            if (!uc->accepted || uc->closing) {
+                continue;
+            }
+
+            if (uc->recv_len > 0 || uc->recv_fin || uc->peer_closed || uc->failed) {
+                return uc;
+            }
+        }
+
+        now = quic_timestamp();
+
+        if (deadline != UINT64_MAX) {
+            if (now >= deadline) {
+                return NULL;
+            }
+            wait_ms = (int)((deadline - now + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS);
+        }
+
+        if (uquic_listener_pump(l, wait_ms) < 0) {
+            return NULL;
+        }
+    }
 }
 
 int64_t uquic_stream_open(uquic_conn *conn) {
@@ -410,8 +755,10 @@ int64_t uquic_stream_open(uquic_conn *conn) {
 
 int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t len, int fin) {
     struct uquic_conn *uc = conn;
-    size_t offset = 0;
+    const size_t cap = sizeof(uc->txbuf);
+    size_t copied = 0;
     size_t send_pending = 0;
+    int fin_done = 0;
 
     for (;;) {
         ngtcp2_ssize datalen, wlen;
@@ -423,13 +770,51 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
         struct io_uring_sqe *sqe;
         ngtcp2_tstamp now = quic_timestamp();
 
-        if (offset < len) {
-            vec.base = (uint8_t *)data + offset;
-            vec.len = len - offset;
+        while (copied < len) {
+            size_t staged = (size_t)(uc->tx_written - uc->tx_acked);
+            size_t space = cap - staged;
+            size_t idx, run, n;
+
+            if (space == 0) {
+                break;
+            }
+
+            idx = (size_t)(uc->tx_written % cap);
+            run = cap - idx;
+            n = len - copied;
+
+            if (n > space) {
+                n = space;
+            }
+            if (n > run) {
+                n = run;
+            }
+
+            memcpy(uc->txbuf + idx, data + copied, n);
+            copied += n;
+            uc->tx_written += n;
+        }
+
+        if (uc->tx_sent < uc->tx_written) {
+            size_t idx = (size_t)(uc->tx_sent % cap);
+            size_t avail = (size_t)(uc->tx_written - uc->tx_sent);
+            size_t run = cap - idx;
+
+            if (avail > run) {
+                avail = run;
+            }
+
+            vec.base = uc->txbuf + idx;
+            vec.len = avail;
             datav = &vec;
             datavcnt = 1;
             wstream_id = stream_id;
-            wflags = fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0;
+            wflags = (fin && copied == len && uc->tx_sent + avail == uc->tx_written) ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0;
+        } else if (fin && !fin_done && copied == len) {
+            datav = NULL;
+            datavcnt = 0;
+            wstream_id = stream_id;
+            wflags = NGTCP2_WRITE_STREAM_FLAG_FIN;
         } else {
             datav = NULL;
             datavcnt = 0;
@@ -446,7 +831,7 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
 
         if (wlen == 0) {
             if (send_pending > 0) {
-                int fr = quic_flush_sends(&uc->ring, send_pending, "uquic.c, uquic_send()");
+                int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_send()");
 
                 send_pending = 0;
 
@@ -455,9 +840,9 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
                 }
             }
 
-            if (offset < len) {
-                if (uquic_pump(uc) != 0) {
-                    fprintf(stderr, "uquic.c, uquic_send(): connection failed with %zu of %zu bytes sent\n", offset, len);
+            if (copied < len || uc->tx_sent < uc->tx_written || (fin && !fin_done)) {
+                if (uquic_conn_progress(uc) != 0) {
+                    fprintf(stderr, "uquic.c, uquic_send(): connection failed with %llu of %zu bytes sent\n", (unsigned long long)uc->tx_sent, len);
                     uc->failed = 1;
                     return -1;
                 }
@@ -467,21 +852,26 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
             break;
         }
 
-        if (datalen > 0 && wstream_id == stream_id) {
-            offset += (size_t)datalen;
-            uc->tx_sent += (uint64_t)datalen;
+        if (wstream_id == stream_id) {
+            if (datalen > 0) {
+                uc->tx_sent += (uint64_t)datalen;
+            }
+
+            if ((wflags & NGTCP2_WRITE_STREAM_FLAG_FIN) && uc->tx_sent == uc->tx_written && copied == len) {
+                fin_done = 1;
+            }
         }
 
-        sqe = io_uring_get_sqe(&uc->ring);
+        sqe = io_uring_get_sqe(uc->ring);
         if (sqe == NULL) {
             fprintf(stderr, "uquic.c, uquic_send(): io_uring_get_sqe (send) returned NULL\n");
             return -1;
         }
-        io_uring_prep_send(sqe, uc->sock, uc->sbuf[send_pending], (size_t)wlen, 0);
+        uquic_prep_send(uc, sqe, uc->sbuf[send_pending], (size_t)wlen);
         send_pending++;
 
         if (send_pending == QUIC_SEND_BATCH) {
-            int fr = quic_flush_sends(&uc->ring, send_pending, "uquic.c, uquic_send()");
+            int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_send()");
 
             send_pending = 0;
 
@@ -549,7 +939,7 @@ ssize_t uquic_recv(uquic_conn *conn, int64_t *stream_id, uint8_t *buf, size_t bu
             return -1;
         }
 
-        rv = uquic_pump(uc);
+        rv = uquic_conn_progress(uc);
 
         if (rv < 0) {
             uc->failed = 1;
@@ -577,7 +967,7 @@ static int uquic_close_wait_acked(struct uquic_conn *uc) {
             return -1;
         }
 
-        if (uquic_pump(uc) != 0) {
+        if (uquic_conn_progress(uc) != 0) {
             return -1;
         }
     }
@@ -585,10 +975,34 @@ static int uquic_close_wait_acked(struct uquic_conn *uc) {
     return 0;
 }
 
+static void uquic_close_linger_listener(struct uquic_conn *uc) {
+    ngtcp2_duration quiet = ngtcp2_conn_get_pto2(uc->conn);
+    ngtcp2_tstamp now = quic_timestamp();
+    ngtcp2_tstamp deadline = now + 3 * quiet;
+
+    while (now < deadline) {
+        ngtcp2_duration left = deadline - now;
+        ngtcp2_duration wait = quiet < left ? quiet : left;
+        int timeout_ms = (int)((wait + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS);
+        int rv = uquic_listener_pump(uc->listener, timeout_ms);
+
+        if (rv <= 0) {
+            return;
+        }
+
+        now = quic_timestamp();
+    }
+}
+
 static void uquic_close_linger(struct uquic_conn *uc, size_t pktlen) {
     ngtcp2_duration quiet = ngtcp2_conn_get_pto2(uc->conn);
     ngtcp2_tstamp now = quic_timestamp();
     ngtcp2_tstamp deadline = now + 3 * quiet;
+
+    if (uc->listener != NULL) {
+        uquic_close_linger_listener(uc);
+        return;
+    }
 
     while (now < deadline) {
         struct io_uring_sqe *rsqe, *tsqe, *ssqe;
@@ -601,7 +1015,7 @@ static void uquic_close_linger(struct uquic_conn *uc, size_t pktlen) {
         int got_recv = 0;
         int pending = 2;
 
-        rsqe = io_uring_get_sqe(&uc->ring);
+        rsqe = io_uring_get_sqe(uc->ring);
         if (rsqe == NULL) {
             return;
         }
@@ -612,19 +1026,19 @@ static void uquic_close_linger(struct uquic_conn *uc, size_t pktlen) {
         ts.tv_sec = timeout_ms / 1000;
         ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
 
-        tsqe = io_uring_get_sqe(&uc->ring);
+        tsqe = io_uring_get_sqe(uc->ring);
         if (tsqe == NULL) {
             return;
         }
         io_uring_prep_link_timeout(tsqe, &ts, 0);
         io_uring_sqe_set_data(tsqe, (void *)(uintptr_t)2);
 
-        if (io_uring_submit(&uc->ring) < 0) {
+        if (io_uring_submit(uc->ring) < 0) {
             return;
         }
 
         while (pending > 0) {
-            if (quic_wait_cqe(&uc->ring, &cqe) < 0) {
+            if (quic_wait_cqe(uc->ring, &cqe) < 0) {
                 return;
             }
 
@@ -633,7 +1047,7 @@ static void uquic_close_linger(struct uquic_conn *uc, size_t pktlen) {
                 got_recv = 1;
             }
 
-            io_uring_cqe_seen(&uc->ring, cqe);
+            io_uring_cqe_seen(uc->ring, cqe);
             pending--;
         }
 
@@ -641,16 +1055,16 @@ static void uquic_close_linger(struct uquic_conn *uc, size_t pktlen) {
             return;
         }
 
-        ssqe = io_uring_get_sqe(&uc->ring);
+        ssqe = io_uring_get_sqe(uc->ring);
         if (ssqe == NULL) {
             return;
         }
-        io_uring_prep_send(ssqe, uc->sock, uc->sbuf[0], pktlen, 0);
+        uquic_prep_send(uc, ssqe, uc->sbuf[0], pktlen);
 
-        if (io_uring_submit(&uc->ring) < 0 || quic_wait_cqe(&uc->ring, &cqe) < 0) {
+        if (io_uring_submit(uc->ring) < 0 || quic_wait_cqe(uc->ring, &cqe) < 0) {
             return;
         }
-        io_uring_cqe_seen(&uc->ring, cqe);
+        io_uring_cqe_seen(uc->ring, cqe);
 
         now = quic_timestamp();
     }
@@ -674,24 +1088,27 @@ int uquic_close(uquic_conn *conn) {
     ngtcp2_ccerr_default(&ccerr);
     close_ret = ngtcp2_conn_write_connection_close(uc->conn, &uc->ps.path, &uc->pi, uc->sbuf[0], sizeof(uc->sbuf[0]), &ccerr, quic_timestamp());
     if (close_ret > 0) {
-        struct io_uring_sqe *sqe = io_uring_get_sqe(&uc->ring);
+        struct io_uring_sqe *sqe = io_uring_get_sqe(uc->ring);
         struct io_uring_cqe *cqe;
+
+        uc->closing = 1;
+        uc->close_len = (size_t)close_ret;
 
         if (sqe == NULL) {
             fprintf(stderr, "uquic.c, uquic_close(): io_uring_get_sqe (connection_close) returned NULL\n");
         } else {
-            io_uring_prep_send(sqe, uc->sock, uc->sbuf[0], (size_t)close_ret, 0);
+            uquic_prep_send(uc, sqe, uc->sbuf[0], (size_t)close_ret);
 
-            if (io_uring_submit(&uc->ring) < 0 || quic_wait_cqe(&uc->ring, &cqe) < 0) {
+            if (io_uring_submit(uc->ring) < 0 || quic_wait_cqe(uc->ring, &cqe) < 0) {
                 fprintf(stderr, "uquic.c, uquic_close(): io_uring send for connection_close failed\n");
             } else {
                 if (cqe->res < 0) {
                     fprintf(stderr, "uquic.c, uquic_close(): send() for connection_close failed (peer likely already gone): %s\n", strerror(-cqe->res));
-                    io_uring_cqe_seen(&uc->ring, cqe);
+                    io_uring_cqe_seen(uc->ring, cqe);
                     uquic_teardown(uc, 1);
                     return rc;
                 }
-                io_uring_cqe_seen(&uc->ring, cqe);
+                io_uring_cqe_seen(uc->ring, cqe);
                 uquic_close_linger(uc, (size_t)close_ret);
             }
         }

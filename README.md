@@ -13,12 +13,48 @@ io_uring layer uses [liburing](https://github.com/axboe/liburing/blob/master/src
 
 ```c
 uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client_opts *opts);
-uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_file, const char *key_file);
+
+uquic_listener *uquic_listen(const char *host, const char *port, const char *cert_file, const char *key_file);
+uquic_conn *uquic_accept(uquic_listener *listener);
+uquic_conn *uquic_next(uquic_listener *listener, int timeout_ms);
+void uquic_listener_close(uquic_listener *listener);
+
 int64_t uquic_stream_open(uquic_conn *conn);
 int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t len, int fin);
 ssize_t uquic_recv(uquic_conn *conn, int64_t *stream_id, uint8_t *buf, size_t buflen, int *fin);
 int uquic_close(uquic_conn *conn);
 ```
+
+`uquic_send` copies what it is given, so the caller's buffer can be freed or
+reused as soon as it returns. QUIC keeps unacknowledged data for retransmission,
+and a library that referenced the caller's memory that long would be handing out
+a use-after-free.
+
+## Serving several connections
+
+A listener owns the UDP socket and the io_uring ring; connections borrow both, so
+one socket serves many connections, routed by connection ID.
+
+```c
+uquic_listener *l = uquic_listen("127.0.0.1", "4433", "cert.pem", "key.pem");
+
+uquic_conn *c = uquic_accept(l);        /* blocks for the next new connection */
+uquic_conn *r = uquic_next(l, 100);     /* whichever connection has data, or NULL */
+
+uquic_recv(r, ...);
+uquic_close(c);                         /* the connection goes, the listener stays */
+uquic_listener_close(l);
+```
+
+`uquic_accept` waits for a *new* connection, `uquic_next` for data on one already
+accepted; both keep every other connection on the listener serviced while they
+wait. Packets that do not belong to a known connection and do not open a valid
+new one are dropped, so stray traffic to the port can no longer take the server
+down.
+
+Connection migration is not implemented: a connection stays bound to the address
+it was accepted from. A listener holds at most `QUIC_MAX_CONNS` (64)
+connections, and each connection is still a single stream.
 
 Underlying QUIC functions are covered in `quic.h`
 

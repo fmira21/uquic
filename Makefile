@@ -18,7 +18,8 @@ SERVER_OBJS := $(SERVER_SRCS:.c=.o)
 LIB_OBJS := quic.o uquic.o
 
 TEST_SRCS := tests/bulk_client.c tests/bulk_server.c tests/recv_contract_server.c \
-             tests/verify_client.c tests/deaf_server.c tests/error_paths.c
+             tests/multi_server.c tests/verify_client.c tests/deaf_server.c \
+             tests/error_paths.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 ALL_SRCS := $(sort $(CLIENT_SRCS) $(SERVER_SRCS))

@@ -14,6 +14,18 @@ static int expect_null(const char *what, uquic_conn *conn) {
     return 0;
 }
 
+static int expect_null_listener(const char *what, uquic_listener *listener) {
+    if (listener != NULL) {
+        fprintf(stderr, "error_paths: FAIL %s returned a listener, expected NULL\n", what);
+        uquic_listener_close(listener);
+        return 1;
+    }
+
+    fprintf(stderr, "error_paths: OK %s returned NULL\n", what);
+
+    return 0;
+}
+
 int main(void) {
     uquic_client_opts opts;
     int bad = 0;
@@ -33,14 +45,14 @@ int main(void) {
     bad |= expect_null("connect to unresolvable host",
                        uquic_connect("no.such.host.invalid", "4433", &opts));
 
-    bad |= expect_null("accept with missing cert",
-                       uquic_accept("127.0.0.1", "4434", "tests/nonexistent-cert.pem", "key.pem"));
+    bad |= expect_null_listener("listen with missing cert",
+                                uquic_listen("127.0.0.1", "4434", "tests/nonexistent-cert.pem", "key.pem"));
 
-    bad |= expect_null("accept with missing key",
-                       uquic_accept("127.0.0.1", "4434", "cert.pem", "tests/nonexistent-key.pem"));
+    bad |= expect_null_listener("listen with missing key",
+                                uquic_listen("127.0.0.1", "4434", "cert.pem", "tests/nonexistent-key.pem"));
 
-    bad |= expect_null("accept with non-certificate cert",
-                       uquic_accept("127.0.0.1", "4434", "Makefile", "key.pem"));
+    bad |= expect_null_listener("listen with non-certificate cert",
+                                uquic_listen("127.0.0.1", "4434", "Makefile", "key.pem"));
 
     if (bad) {
         return 1;

@@ -3,11 +3,19 @@
 #include <unistd.h>
 
 int main(void) {
+    uquic_listener *listener;
     uquic_conn *conn;
 
-    conn = uquic_accept("127.0.0.1", "4433", "cert.pem", "key.pem");
+    listener = uquic_listen("127.0.0.1", "4433", "cert.pem", "key.pem");
+    if (listener == NULL) {
+        fprintf(stderr, "deaf_server: listen failed\n");
+        return 1;
+    }
+
+    conn = uquic_accept(listener);
     if (conn == NULL) {
         fprintf(stderr, "deaf_server: accept failed\n");
+        uquic_listener_close(listener);
         return 1;
     }
 
@@ -16,6 +24,7 @@ int main(void) {
     sleep(300);
 
     uquic_close(conn);
+    uquic_listener_close(listener);
 
     return 0;
 }

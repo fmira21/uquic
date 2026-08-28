@@ -357,9 +357,29 @@ static void quic_rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *r
     }
 }
 
+int quic_conn_add_cid(struct uquic_conn *uc, const ngtcp2_cid *cid) {
+    size_t i;
+
+    for (i = 0; i < uc->ncids; i++) {
+        if (ngtcp2_cid_eq(&uc->cids[i], cid)) {
+            return 0;
+        }
+    }
+
+    if (uc->ncids == QUIC_CONN_CIDS) {
+        fprintf(stderr, "quic.c, quic_conn_add_cid(): connection id table full\n");
+        return -1;
+    }
+
+    uc->cids[uc->ncids++] = *cid;
+
+    return 0;
+}
+
 static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, ngtcp2_stateless_reset_token *token, size_t cidlen, void *user_data) {
+    struct uquic_conn *uc = user_data;
+
     (void)conn;
-    (void)user_data;
 
     if (RAND_bytes(cid->data, (int)cidlen) != 1) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -369,6 +389,27 @@ static int quic_get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, ngt
 
     if (RAND_bytes(token->data, NGTCP2_STATELESS_RESET_TOKENLEN) != 1) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+
+    if (uc->listener != NULL && quic_conn_add_cid(uc, cid) != 0) {
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
+
+    return 0;
+}
+
+static int quic_remove_connection_id_cb(ngtcp2_conn *conn, const ngtcp2_cid *cid, void *user_data) {
+    struct uquic_conn *uc = user_data;
+    size_t i;
+
+    (void)conn;
+
+    for (i = 0; i < uc->ncids; i++) {
+        if (ngtcp2_cid_eq(&uc->cids[i], cid)) {
+            uc->cids[i] = uc->cids[uc->ncids - 1];
+            uc->ncids--;
+            break;
+        }
     }
 
     return 0;
@@ -456,6 +497,7 @@ void quic_build_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->recv_retry = ngtcp2_crypto_recv_retry_cb;
     callbacks->rand = quic_rand_cb;
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
+    callbacks->remove_connection_id = quic_remove_connection_id_cb;
     callbacks->handshake_completed = quic_handshake_completed_cb;
     callbacks->recv_stream_data = quic_recv_stream_data_cb;
     callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
@@ -475,9 +517,14 @@ void quic_build_server_callbacks(ngtcp2_callbacks *callbacks) {
     callbacks->get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb;
     callbacks->rand = quic_rand_cb;
     callbacks->get_new_connection_id2 = quic_get_new_connection_id_cb;
+    callbacks->remove_connection_id = quic_remove_connection_id_cb;
     callbacks->handshake_completed = quic_handshake_completed_cb;
     callbacks->recv_stream_data = quic_recv_stream_data_cb;
     callbacks->acked_stream_data_offset = quic_acked_stream_data_offset_cb;
+}
+
+void quic_setup_path_addrs(ngtcp2_path_storage *ps, const struct sockaddr *local, socklen_t local_len, const struct sockaddr *remote, socklen_t remote_len) {
+    ngtcp2_path_storage_init(ps, local, local_len, remote, remote_len, NULL);
 }
 
 int quic_setup_path(int sock, ngtcp2_path_storage *ps) {
@@ -514,7 +561,7 @@ ngtcp2_tstamp quic_timestamp(void) {
 
 int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, struct uquic_conn *uc) {
     uint8_t buf[NGTCP2_MAX_CIDLEN];
-    size_t cidlen = 8;
+    size_t cidlen = QUIC_CIDLEN;
     ngtcp2_cid dcid, scid;
     ngtcp2_settings settings;
     ngtcp2_transport_params params;
@@ -562,7 +609,7 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, s
 
 int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, struct uquic_conn *uc, const ngtcp2_pkt_hd *hd) {
     uint8_t buf[NGTCP2_MAX_CIDLEN];
-    size_t cidlen = 8;
+    size_t cidlen = QUIC_CIDLEN;
     ngtcp2_cid scid;
     ngtcp2_settings settings;
     ngtcp2_transport_params params;
@@ -591,6 +638,10 @@ int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl
     params.max_idle_timeout = 30 * NGTCP2_SECONDS;
     params.original_dcid = hd->dcid;
     params.original_dcid_present = 1;
+
+    if (quic_conn_add_cid(uc, &scid) != 0) {
+        return -1;
+    }
 
     if (ngtcp2_conn_server_new(&conn, &hd->scid, &scid, &ps->path, hd->version, &callbacks, &settings, &params, NULL, uc) != 0) {
         fprintf(stderr, "quic.c, quic_setup_server_conn(): ngtcp2_conn_server_new failed\n");

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
+    uquic_listener *listener;
     uquic_conn *conn;
     uint8_t buf[65536];
     int64_t sid = -1;
@@ -13,7 +14,13 @@ int main(int argc, char **argv) {
     unsigned long long expect = argc > 1 ? strtoull(argv[1], NULL, 10) : 0;
     int corrupt = 0;
 
-    conn = uquic_accept("127.0.0.1", "4433", "cert.pem", "key.pem");
+    listener = uquic_listen("127.0.0.1", "4433", "cert.pem", "key.pem");
+    if (listener == NULL) {
+        fprintf(stderr, "bulk_server: listen failed\n");
+        return 1;
+    }
+
+    conn = uquic_accept(listener);
     if (conn == NULL) {
         fprintf(stderr, "bulk_server: accept failed\n");
         return 1;
@@ -47,6 +54,7 @@ int main(int argc, char **argv) {
     }
 
     uquic_close(conn);
+    uquic_listener_close(listener);
 
     if (corrupt) {
         fprintf(stderr, "bulk_server: FAIL payload corrupt at ~%llu\n", got);

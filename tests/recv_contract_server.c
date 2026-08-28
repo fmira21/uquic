@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
+    uquic_listener *listener;
     uquic_conn *conn;
     uint8_t buf[65536];
     unsigned long long expect = argc > 1 ? strtoull(argv[1], NULL, 10) : 5000;
@@ -21,7 +22,13 @@ int main(int argc, char **argv) {
         buflen = sizeof(buf);
     }
 
-    conn = uquic_accept("127.0.0.1", "4433", "cert.pem", "key.pem");
+    listener = uquic_listen("127.0.0.1", "4433", "cert.pem", "key.pem");
+    if (listener == NULL) {
+        fprintf(stderr, "recv_contract_server: listen failed\n");
+        return 1;
+    }
+
+    conn = uquic_accept(listener);
     if (conn == NULL) {
         fprintf(stderr, "recv_contract_server: accept failed\n");
         return 1;
@@ -74,24 +81,28 @@ int main(int argc, char **argv) {
     if (corrupt) {
         fprintf(stderr, "recv_contract_server: FAIL payload corrupt or out of order at ~%llu\n", got);
         uquic_close(conn);
+        uquic_listener_close(listener);
         return 1;
     }
 
     if (got != expect) {
         fprintf(stderr, "recv_contract_server: FAIL got %llu want %llu\n", got, expect);
         uquic_close(conn);
+        uquic_listener_close(listener);
         return 1;
     }
 
     if (!eof) {
         fprintf(stderr, "recv_contract_server: FAIL never saw the 0 return for end of stream\n");
         uquic_close(conn);
+        uquic_listener_close(listener);
         return 1;
     }
 
     if (fins != 1 || early_fin) {
         fprintf(stderr, "recv_contract_server: FAIL fin flagged %lu times, early=%d\n", fins, early_fin);
         uquic_close(conn);
+        uquic_listener_close(listener);
         return 1;
     }
 
@@ -102,6 +113,7 @@ int main(int argc, char **argv) {
     }
 
     uquic_close(conn);
+    uquic_listener_close(listener);
 
     return 0;
 }
