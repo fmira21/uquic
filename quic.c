@@ -388,21 +388,41 @@ static int quic_handshake_completed_cb(ngtcp2_conn *conn, void *user_data) {
 
 static int quic_recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t offset, const uint8_t *data, size_t datalen, void *user_data, void *stream_user_data) {
     struct uquic_conn *uc = user_data;
-    size_t n;
+    size_t tail, first;
 
+    (void)conn;
     (void)offset;
     (void)stream_user_data;
 
-    ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
-    ngtcp2_conn_extend_max_offset(conn, datalen);
+    if (uc->recv_stream_id >= 0 && stream_id != uc->recv_stream_id) {
+        fprintf(stderr, "quic.c, quic_recv_stream_data_cb(): data on stream %lld, but this connection already carries stream %lld\n", (long long)stream_id, (long long)uc->recv_stream_id);
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
 
-    n = datalen < sizeof(uc->recv_buf) ? datalen : sizeof(uc->recv_buf);
-    memcpy(uc->recv_buf, data, n);
+    if (datalen > sizeof(uc->recv_buf) - uc->recv_len) {
+        fprintf(stderr, "quic.c, quic_recv_stream_data_cb(): peer sent %zu bytes past the advertised window\n", datalen);
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+    }
 
+    tail = (uc->recv_head + uc->recv_len) % sizeof(uc->recv_buf);
+    first = sizeof(uc->recv_buf) - tail;
+
+    if (first > datalen) {
+        first = datalen;
+    }
+
+    memcpy(uc->recv_buf + tail, data, first);
+
+    if (datalen > first) {
+        memcpy(uc->recv_buf, data + first, datalen - first);
+    }
+
+    uc->recv_len += datalen;
     uc->recv_stream_id = stream_id;
-    uc->recv_len = n;
-    uc->recv_fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ? 1 : 0;
-    uc->recv_pending = 1;
+
+    if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+        uc->recv_fin = 1;
+    }
 
     return 0;
 }

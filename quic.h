@@ -38,10 +38,10 @@ struct uquic_conn {
     uint8_t sbuf[QUIC_SEND_BATCH][1452];
     uint8_t pktbuf[65536];
 
-    int recv_pending;
     int64_t recv_stream_id;
-    size_t recv_len;
     int recv_fin;
+    size_t recv_head;
+    size_t recv_len;
     uint8_t recv_buf[65536];
 };
 

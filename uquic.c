@@ -259,6 +259,7 @@ uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client
         return NULL;
     }
     uc->sock = -1;
+    uc->recv_stream_id = -1;
     uc->conn_ref.user_data = uc;
 
     uc->sock = quic_create_socket(host, port);
@@ -316,6 +317,7 @@ uquic_conn *uquic_accept(const char *host, const char *port, const char *cert_fi
         return NULL;
     }
     uc->sock = -1;
+    uc->recv_stream_id = -1;
     uc->conn_ref.user_data = uc;
 
     uc->sock = quic_create_listen_socket(host, port);
@@ -500,24 +502,62 @@ ssize_t uquic_recv(uquic_conn *conn, int64_t *stream_id, uint8_t *buf, size_t bu
     struct uquic_conn *uc = conn;
 
     for (;;) {
-        if (uc->recv_pending) {
-            size_t n = uc->recv_len < buflen ? uc->recv_len : buflen;
+        int rv;
 
-            memcpy(buf, uc->recv_buf, n);
+        if (uc->recv_len > 0) {
+            size_t n = uc->recv_len < buflen ? uc->recv_len : buflen;
+            size_t first = sizeof(uc->recv_buf) - uc->recv_head;
+
+            if (first > n) {
+                first = n;
+            }
+
+            memcpy(buf, uc->recv_buf + uc->recv_head, first);
+
+            if (n > first) {
+                memcpy(buf + first, uc->recv_buf, n - first);
+            }
+
+            uc->recv_head = (uc->recv_head + n) % sizeof(uc->recv_buf);
+            uc->recv_len -= n;
+
             if (stream_id != NULL) {
                 *stream_id = uc->recv_stream_id;
             }
             if (fin != NULL) {
-                *fin = uc->recv_fin;
+                *fin = (uc->recv_fin && uc->recv_len == 0) ? 1 : 0;
             }
-            uc->recv_pending = 0;
+
+            ngtcp2_conn_extend_max_stream_offset(uc->conn, uc->recv_stream_id, n);
+            ngtcp2_conn_extend_max_offset(uc->conn, n);
 
             return (ssize_t)n;
         }
 
-        if (uquic_pump(uc) != 0) {
+        if (uc->recv_fin) {
+            if (stream_id != NULL) {
+                *stream_id = uc->recv_stream_id;
+            }
+            if (fin != NULL) {
+                *fin = 1;
+            }
+
+            return 0;
+        }
+
+        if (uc->peer_closed || uc->failed) {
+            return -1;
+        }
+
+        rv = uquic_pump(uc);
+
+        if (rv < 0) {
             uc->failed = 1;
             return -1;
+        }
+
+        if (rv > 0) {
+            uc->peer_closed = 1;
         }
     }
 }

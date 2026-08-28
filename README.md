@@ -24,6 +24,33 @@ Underlying QUIC functions are covered in `quic.h`
 
 See `example_client.c`/`example_server.c` for usage.
 
+## Receiving
+
+`uquic_recv` reads from a stream the way `read()` does:
+
+| return | meaning |
+|---|---|
+| `> 0` | bytes copied into `buf`; `fin` is set only on the chunk that ends the stream |
+| `0` | clean end of stream, everything has been delivered |
+| `-1` | failure, including the peer vanishing before it finished sending |
+
+A buffer smaller than what has arrived is fine — the remainder stays queued for the
+next call, so no read can lose data.
+
+Received data is held in a 64KB per-connection buffer, and the QUIC flow control
+window is extended only as the application consumes it. That is what applies
+backpressure: a peer cannot get more than one window ahead of a slow reader, and
+the buffer cannot overflow.
+
+The consequence is that `uquic_send` blocks while the peer's window is closed. Two
+peers that each send more than a window before either starts reading will deadlock
+until the idle timeout fires — the same thing happens with TCP and full socket
+buffers. Full-duplex use needs a non-blocking mode, which this prototype does not
+have yet.
+
+A connection carries a single stream. Data arriving on a second stream is refused
+rather than mixed into the buffer.
+
 ## Closing
 
 `uquic_close` closes gracefully.

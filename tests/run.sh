@@ -3,7 +3,7 @@ set -u
 
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-SUITES="ping_pong.sh bulk.sh tls_verify.sh error_paths.sh"
+SUITES="ping_pong.sh bulk.sh recv_contract.sh tls_verify.sh error_paths.sh"
 SLOW_SUITES="idle_timeout.sh"
 
 failed=0

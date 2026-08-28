@@ -6,6 +6,7 @@ example_server
 roadmap.md
 tests/bulk_client
 tests/bulk_server
+tests/recv_contract_server
 tests/verify_client
 tests/deaf_server
 tests/error_paths
