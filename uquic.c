@@ -22,46 +22,128 @@ static int uquic_rand_failed(struct uquic_conn *uc, const char *tag) {
     return 0;
 }
 
-static int quic_flush_sends(struct io_uring *ring, size_t count, const char *tag) {
-    struct io_uring_cqe *cqe;
-    size_t i;
+static void uquic_send_cqe(struct io_uring_cqe *cqe) {
+    struct uquic_conn *sc = io_uring_cqe_get_data(cqe);
 
-    if (io_uring_submit(ring) < 0) {
-        fprintf(stderr, "%s: io_uring_submit (send) failed\n", tag);
+    if (!(cqe->flags & IORING_CQE_F_NOTIF)) {
+        if (cqe->res < 0) {
+            if (-cqe->res == ECONNREFUSED) {
+                fprintf(stderr, "uquic.c, uquic_send_cqe(): send(): peer already gone (ECONNREFUSED)\n");
+                sc->peer_closed = 1;
+            } else {
+                fprintf(stderr, "uquic.c, uquic_send_cqe(): send(): %s\n", strerror(-cqe->res));
+                sc->failed = 1;
+            }
+        }
+
+        if (cqe->flags & IORING_CQE_F_MORE) {
+            return;
+        }
+    }
+
+    if (sc->sbuf_inflight > 0) {
+        sc->sbuf_inflight--;
+    }
+}
+
+static int uquic_cqe_is_send(struct io_uring_cqe *cqe) {
+    return (uintptr_t)io_uring_cqe_get_data(cqe) > 2;
+}
+
+static void uquic_prep_send(struct uquic_conn *uc, struct io_uring_sqe *sqe, const uint8_t *buf, size_t len) {
+    if (uc->listener != NULL) {
+        io_uring_prep_sendto(sqe, QUIC_FIXED_FD, buf, len, 0, uc->ps.path.remote.addr, uc->ps.path.remote.addrlen);
+    } else {
+        io_uring_prep_send_zc(sqe, QUIC_FIXED_FD, buf, len, 0, 0);
+    }
+
+    sqe->flags |= IOSQE_FIXED_FILE;
+}
+
+static int uquic_reap_ready(struct uquic_conn *uc) {
+    struct io_uring_cqe *cqe;
+    int reaped = 0;
+
+    while (io_uring_peek_cqe(uc->ring, &cqe) == 0) {
+        if (uquic_cqe_is_send(cqe)) {
+            uquic_send_cqe(cqe);
+            io_uring_cqe_seen(uc->ring, cqe);
+            reaped++;
+            continue;
+        }
+
+        break;
+    }
+
+    return reaped;
+}
+
+static int uquic_reap_one(struct uquic_conn *uc) {
+    struct io_uring_cqe *cqe;
+
+    if (uquic_reap_ready(uc) > 0) {
+        return 0;
+    }
+
+    if (io_uring_submit_and_wait(uc->ring, 1) < 0) {
+        fprintf(stderr, "uquic.c, uquic_reap_one(): io_uring_submit_and_wait failed\n");
         return -1;
     }
 
-    for (i = 0; i < count; i++) {
-        int wret;
+    if (quic_wait_cqe(uc->ring, &cqe) < 0) {
+        fprintf(stderr, "uquic.c, uquic_reap_one(): io_uring_wait_cqe failed\n");
+        return -1;
+    }
 
-        if (quic_wait_cqe(ring, &cqe) < 0) {
-            fprintf(stderr, "%s: io_uring_wait_cqe (send) failed\n", tag);
+    if (uquic_cqe_is_send(cqe)) {
+        uquic_send_cqe(cqe);
+    }
+
+    io_uring_cqe_seen(uc->ring, cqe);
+
+    return 0;
+}
+
+static int uquic_queue_send(struct uquic_conn *uc, const uint8_t *buf, size_t len) {
+    struct io_uring_sqe *sqe;
+
+    while (uc->sbuf_inflight == QUIC_SEND_BATCH) {
+        if (uquic_reap_one(uc) < 0) {
+            return -1;
+        }
+    }
+
+    sqe = io_uring_get_sqe(uc->ring);
+
+    if (sqe == NULL) {
+        if (io_uring_submit(uc->ring) < 0) {
+            fprintf(stderr, "uquic.c, uquic_queue_send(): io_uring_submit failed\n");
             return -1;
         }
 
-        wret = cqe->res;
-        io_uring_cqe_seen(ring, cqe);
+        sqe = io_uring_get_sqe(uc->ring);
 
-        if (wret < 0) {
-            if (-wret == ECONNREFUSED) {
-                fprintf(stderr, "%s: send(): peer already gone (ECONNREFUSED), stopping\n", tag);
-                return 1;
-            }
-            fprintf(stderr, "%s: send(): %s\n", tag, strerror(-wret));
+        if (sqe == NULL) {
+            fprintf(stderr, "uquic.c, uquic_queue_send(): io_uring_get_sqe returned NULL\n");
+            return -1;
+        }
+    }
+
+    uquic_prep_send(uc, sqe, buf, len);
+    io_uring_sqe_set_data(sqe, uc);
+    uc->sbuf_inflight++;
+
+    return 0;
+}
+
+static int uquic_drain_sends(struct uquic_conn *uc) {
+    while (uc->sbuf_inflight > 0) {
+        if (uquic_reap_one(uc) < 0) {
             return -1;
         }
     }
 
     return 0;
-}
-
-static void uquic_prep_send(struct uquic_conn *uc, struct io_uring_sqe *sqe, const uint8_t *buf, size_t len) {
-    if (uc->listener != NULL) {
-        io_uring_prep_sendto(sqe, uc->sock, buf, len, 0, uc->ps.path.remote.addr, uc->ps.path.remote.addrlen);
-        return;
-    }
-
-    io_uring_prep_send(sqe, uc->sock, buf, len, 0);
 }
 
 static void uquic_listener_drop(struct uquic_listener *l, struct uquic_conn *uc) {
@@ -76,10 +158,127 @@ static void uquic_listener_drop(struct uquic_listener *l, struct uquic_conn *uc)
     }
 }
 
+static int uquic_bufring_setup(struct io_uring *ring, struct io_uring_buf_ring **out_br, uint8_t **out_buf) {
+    struct io_uring_buf_ring *br;
+    uint8_t *buf;
+    int ret = 0;
+    int i;
+
+    buf = malloc((size_t)QUIC_RECV_BUFS * QUIC_RECV_BUF_SIZE);
+    if (buf == NULL) {
+        fprintf(stderr, "uquic.c, uquic_bufring_setup(): malloc failed\n");
+        return -1;
+    }
+
+    br = io_uring_setup_buf_ring(ring, QUIC_RECV_BUFS, QUIC_BGID, 0, &ret);
+    if (br == NULL) {
+        fprintf(stderr, "uquic.c, uquic_bufring_setup(): io_uring_setup_buf_ring: %s\n", strerror(-ret));
+        free(buf);
+        return -1;
+    }
+
+    for (i = 0; i < QUIC_RECV_BUFS; i++) {
+        io_uring_buf_ring_add(br, buf + (size_t)i * QUIC_RECV_BUF_SIZE, QUIC_RECV_BUF_SIZE, (unsigned short)i, io_uring_buf_ring_mask(QUIC_RECV_BUFS), i);
+    }
+
+    io_uring_buf_ring_advance(br, QUIC_RECV_BUFS);
+
+    *out_br = br;
+    *out_buf = buf;
+
+    return 0;
+}
+
+static void uquic_bufring_free(struct io_uring *ring, struct io_uring_buf_ring *br, uint8_t *buf) {
+    if (br != NULL) {
+        io_uring_free_buf_ring(ring, br, QUIC_RECV_BUFS, QUIC_BGID);
+    }
+
+    free(buf);
+}
+
+static void uquic_bufring_recycle(struct io_uring_buf_ring *br, uint8_t *buf, unsigned short bid) {
+    io_uring_buf_ring_add(br, buf + (size_t)bid * QUIC_RECV_BUF_SIZE, QUIC_RECV_BUF_SIZE, bid, io_uring_buf_ring_mask(QUIC_RECV_BUFS), 0);
+    io_uring_buf_ring_advance(br, 1);
+}
+
+static struct io_uring_sqe *uquic_get_sqe(struct io_uring *ring, const char *tag) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+
+    if (sqe != NULL) {
+        return sqe;
+    }
+
+    if (io_uring_submit(ring) < 0) {
+        fprintf(stderr, "%s: io_uring_submit failed\n", tag);
+        return NULL;
+    }
+
+    sqe = io_uring_get_sqe(ring);
+
+    if (sqe == NULL) {
+        fprintf(stderr, "%s: io_uring_get_sqe returned NULL\n", tag);
+    }
+
+    return sqe;
+}
+
+static int uquic_arm_recv(struct uquic_conn *uc) {
+    struct io_uring_sqe *sqe;
+
+    if (uc->recv_armed) {
+        return 0;
+    }
+
+    sqe = uquic_get_sqe(uc->ring, "uquic.c, uquic_arm_recv()");
+    if (sqe == NULL) {
+        return -1;
+    }
+
+    io_uring_prep_recv_multishot(sqe, QUIC_FIXED_FD, NULL, 0, 0);
+    sqe->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+    sqe->buf_group = QUIC_BGID;
+    io_uring_sqe_set_data(sqe, (void *)(uintptr_t)1);
+
+    uc->recv_armed = 1;
+
+    return 0;
+}
+
+static int uquic_listener_arm_recv(struct uquic_listener *l) {
+    struct io_uring_sqe *sqe;
+
+    if (l->recv_armed) {
+        return 0;
+    }
+
+    memset(&l->rmsg, 0, sizeof(l->rmsg));
+    l->rmsg.msg_namelen = sizeof(struct sockaddr_storage);
+
+    sqe = uquic_get_sqe(&l->ring, "uquic.c, uquic_listener_arm_recv()");
+    if (sqe == NULL) {
+        return -1;
+    }
+
+    io_uring_prep_recvmsg_multishot(sqe, QUIC_FIXED_FD, &l->rmsg, 0);
+    sqe->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+    sqe->buf_group = QUIC_BGID;
+    io_uring_sqe_set_data(sqe, (void *)(uintptr_t)1);
+
+    l->recv_armed = 1;
+
+    return 0;
+}
+
 static void uquic_teardown(struct uquic_conn *uc, int ring_ready) {
+    if (uc->sbuf_inflight > 0 && (ring_ready || uc->listener != NULL)) {
+        uquic_drain_sends(uc);
+    }
+
     if (uc->listener != NULL) {
         uquic_listener_drop(uc->listener, uc);
     } else if (ring_ready) {
+        uquic_bufring_free(&uc->own_ring, uc->bring, uc->bbuf);
         io_uring_queue_exit(&uc->own_ring);
     }
     if (uc->conn) {
@@ -108,14 +307,20 @@ static void uquic_teardown(struct uquic_conn *uc, int ring_ready) {
  * timeout, and process one incoming packet if it arrived in time.
  * Returns 0 (keep going), 1 (peer gone, ECONNREFUSED), or -1 (fatal). */
 static int uquic_conn_flush(struct uquic_conn *uc) {
-    size_t send_pending = 0;
-
     for (;;) {
         ngtcp2_ssize datalen, wlen;
-        struct io_uring_sqe *sqe;
+        size_t slot;
         ngtcp2_tstamp now = quic_timestamp();
 
-        wlen = ngtcp2_conn_writev_stream(uc->conn, &uc->ps.path, &uc->pi, uc->sbuf[send_pending], sizeof(uc->sbuf[send_pending]), &datalen, 0, -1, NULL, 0, now);
+        while (uc->sbuf_inflight == QUIC_SEND_BATCH) {
+            if (uquic_reap_one(uc) < 0) {
+                return -1;
+            }
+        }
+
+        slot = uc->sbuf_next;
+
+        wlen = ngtcp2_conn_writev_stream(uc->conn, &uc->ps.path, &uc->pi, uc->sbuf[slot], sizeof(uc->sbuf[slot]), &datalen, 0, -1, NULL, 0, now);
 
         if (wlen < 0) {
             fprintf(stderr, "uquic.c, uquic_conn_flush(): ngtcp2_conn_writev_stream failed\n");
@@ -123,42 +328,90 @@ static int uquic_conn_flush(struct uquic_conn *uc) {
         }
 
         if (wlen == 0) {
-            if (send_pending > 0) {
-                int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_conn_flush()");
-
-                send_pending = 0;
-
-                if (fr != 0) {
-                    return fr;
-                }
-            }
-
-            return 0;
+            return uc->peer_closed ? 1 : 0;
         }
 
-        sqe = io_uring_get_sqe(uc->ring);
-        if (sqe == NULL) {
-            fprintf(stderr, "uquic.c, uquic_conn_flush(): io_uring_get_sqe (send) returned NULL\n");
+        if (uquic_queue_send(uc, uc->sbuf[slot], (size_t)wlen) < 0) {
             return -1;
         }
-        uquic_prep_send(uc, sqe, uc->sbuf[send_pending], (size_t)wlen);
-        send_pending++;
 
-        if (send_pending == QUIC_SEND_BATCH) {
-            int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_conn_flush()");
-
-            send_pending = 0;
-
-            if (fr != 0) {
-                return fr;
-            }
-        }
+        uc->sbuf_next = (slot + 1) % QUIC_SEND_BATCH;
     }
 }
 
+static int uquic_client_recv_cqe(struct uquic_conn *uc, struct io_uring_cqe *cqe) {
+    unsigned short bid;
+    int rv;
+
+    if (!(cqe->flags & IORING_CQE_F_MORE)) {
+        uc->recv_armed = 0;
+    }
+
+    if (cqe->res < 0) {
+        if (cqe->res == -ENOBUFS) {
+            return 0;
+        }
+        if (-cqe->res == ECONNREFUSED) {
+            fprintf(stderr, "uquic.c, uquic_client_recv_cqe(): recv(): peer already gone (ECONNREFUSED), stopping\n");
+            return 1;
+        }
+        fprintf(stderr, "uquic.c, uquic_client_recv_cqe(): recv(): %s\n", strerror(-cqe->res));
+        return -1;
+    }
+
+    if (cqe->res == 0 || !(cqe->flags & IORING_CQE_F_BUFFER)) {
+        return 0;
+    }
+
+    bid = (unsigned short)(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
+
+    rv = ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->bbuf + (size_t)bid * QUIC_RECV_BUF_SIZE, (size_t)cqe->res, quic_timestamp());
+
+    uquic_bufring_recycle(uc->bring, uc->bbuf, bid);
+
+    if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) {
+        fprintf(stderr, "uquic.c, uquic_client_recv_cqe(): peer closed the connection\n");
+        uc->peer_closed = 1;
+        return 1;
+    }
+
+    if (rv != 0) {
+        fprintf(stderr, "uquic.c, uquic_client_recv_cqe(): ngtcp2_conn_read_pkt failed\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int uquic_wait_timeout(struct io_uring *ring, int timeout_ms, const char *tag) {
+    struct __kernel_timespec ts;
+    struct __kernel_timespec *tsp = NULL;
+    struct io_uring_cqe *cqe;
+    int rc;
+
+    if (timeout_ms >= 0) {
+        ts.tv_sec = timeout_ms / 1000;
+        ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
+        tsp = &ts;
+    }
+
+    rc = io_uring_submit_and_wait_timeout(ring, &cqe, 1, tsp, NULL);
+
+    if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EAGAIN) {
+        fprintf(stderr, "%s: io_uring_submit_and_wait_timeout: %s\n", tag, strerror(-rc));
+        return -1;
+    }
+
+    return 0;
+}
+
 static int uquic_pump(struct uquic_conn *uc) {
+    struct io_uring_cqe *cqe;
     ngtcp2_tstamp now, expiry, diff;
+    unsigned head;
+    unsigned seen = 0;
     int timeout_ms;
+    int result = 0;
     int fr;
 
     fr = uquic_conn_flush(uc);
@@ -185,87 +438,39 @@ static int uquic_pump(struct uquic_conn *uc) {
         timeout_ms = (int)((diff + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS);
     }
 
-    {
-        struct io_uring_sqe *rsqe;
-        struct __kernel_timespec ts;
-        int have_timeout = (timeout_ms >= 0);
-        int recv_res = 0;
-        int got_recv = 0;
-        int pending = 1;
+    if (uquic_arm_recv(uc) < 0) {
+        return -1;
+    }
+
+    if (uquic_wait_timeout(uc->ring, timeout_ms, "uquic.c, uquic_pump()") < 0) {
+        return -1;
+    }
+
+    io_uring_for_each_cqe(uc->ring, head, cqe) {
         int rv;
 
-        rsqe = io_uring_get_sqe(uc->ring);
-        if (rsqe == NULL) {
-            fprintf(stderr, "uquic.c, uquic_pump(): io_uring_get_sqe (recv) returned NULL\n");
-            return -1;
-        }
-        io_uring_prep_recv(rsqe, uc->sock, uc->pktbuf, sizeof(uc->pktbuf), 0);
-        io_uring_sqe_set_data(rsqe, (void *)(uintptr_t)1);
+        seen++;
 
-        if (have_timeout) {
-            struct io_uring_sqe *tsqe;
-
-            rsqe->flags |= IOSQE_IO_LINK;
-            ts.tv_sec = timeout_ms / 1000;
-            ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
-
-            tsqe = io_uring_get_sqe(uc->ring);
-            if (tsqe == NULL) {
-                fprintf(stderr, "uquic.c, uquic_pump(): io_uring_get_sqe (timeout) returned NULL\n");
-                return -1;
-            }
-            io_uring_prep_link_timeout(tsqe, &ts, 0);
-            io_uring_sqe_set_data(tsqe, (void *)(uintptr_t)2);
-            pending = 2;
+        if (uquic_cqe_is_send(cqe)) {
+            uquic_send_cqe(cqe);
+            continue;
         }
 
-        if (io_uring_submit(uc->ring) < 0) {
-            fprintf(stderr, "uquic.c, uquic_pump(): io_uring_submit (recv) failed\n");
-            return -1;
+        if ((uintptr_t)io_uring_cqe_get_data(cqe) != 1) {
+            continue;
         }
 
-        while (pending > 0) {
-            struct io_uring_cqe *cqe;
+        rv = uquic_client_recv_cqe(uc, cqe);
 
-            if (quic_wait_cqe(uc->ring, &cqe) < 0) {
-                fprintf(stderr, "uquic.c, uquic_pump(): io_uring_wait_cqe (recv) failed\n");
-                return -1;
-            }
-
-            if ((uintptr_t)io_uring_cqe_get_data(cqe) == 1) {
-                recv_res = cqe->res;
-                got_recv = 1;
-            }
-
-            io_uring_cqe_seen(uc->ring, cqe);
-            pending--;
+        if (rv != 0 && result == 0) {
+            result = rv;
         }
+    }
 
-        if (got_recv && recv_res != -ECANCELED) {
-            if (recv_res < 0) {
-                if (-recv_res == ECONNREFUSED) {
-                    fprintf(stderr, "uquic.c, uquic_pump(): recv(): peer already gone (ECONNREFUSED), stopping\n");
-                    return 1;
-                }
-                fprintf(stderr, "uquic.c, uquic_pump(): recv(): %s\n", strerror(-recv_res));
-                return -1;
-            }
+    io_uring_cq_advance(uc->ring, seen);
 
-            now = quic_timestamp();
-
-            rv = ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, uc->pktbuf, (size_t)recv_res, now);
-
-            if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) {
-                fprintf(stderr, "uquic.c, uquic_pump(): peer closed the connection\n");
-                uc->peer_closed = 1;
-                return 1;
-            }
-
-            if (rv != 0) {
-                fprintf(stderr, "uquic.c, uquic_pump(): ngtcp2_conn_read_pkt failed\n");
-                return -1;
-            }
-        }
+    if (result != 0) {
+        return result;
     }
 
     if (uquic_rand_failed(uc, "uquic.c, uquic_pump()")) {
@@ -356,20 +561,20 @@ static void uquic_conn_resend_close(struct uquic_conn *uc) {
     io_uring_cqe_seen(uc->ring, cqe);
 }
 
-static void uquic_listener_route(struct uquic_listener *l, size_t pktlen) {
+static void uquic_listener_route(struct uquic_listener *l, const uint8_t *pkt, size_t pktlen) {
     ngtcp2_version_cid vc;
     struct uquic_conn *uc;
     ngtcp2_pkt_hd hd;
     int rv;
 
-    if (ngtcp2_pkt_decode_version_cid(&vc, l->pktbuf, pktlen, QUIC_CIDLEN) != 0) {
+    if (ngtcp2_pkt_decode_version_cid(&vc, pkt, pktlen, QUIC_CIDLEN) != 0) {
         return;
     }
 
     uc = uquic_listener_find(l, vc.dcid, vc.dcidlen);
 
     if (uc == NULL) {
-        if (ngtcp2_accept(&hd, l->pktbuf, pktlen) != 0) {
+        if (ngtcp2_accept(&hd, pkt, pktlen) != 0) {
             return;
         }
 
@@ -385,7 +590,7 @@ static void uquic_listener_route(struct uquic_listener *l, size_t pktlen) {
         return;
     }
 
-    rv = ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, l->pktbuf, pktlen, quic_timestamp());
+    rv = ngtcp2_conn_read_pkt(uc->conn, &uc->ps.path, &uc->pi, pkt, pktlen, quic_timestamp());
 
     if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) {
         uc->peer_closed = 1;
@@ -398,17 +603,71 @@ static void uquic_listener_route(struct uquic_listener *l, size_t pktlen) {
     }
 }
 
+static int uquic_listener_recv_cqe(struct uquic_listener *l, struct io_uring_cqe *cqe) {
+    struct io_uring_recvmsg_out *o;
+    unsigned short bid;
+    void *buf;
+    void *name;
+    void *payload;
+    size_t paylen;
+
+    if (!(cqe->flags & IORING_CQE_F_MORE)) {
+        l->recv_armed = 0;
+    }
+
+    if (cqe->res < 0) {
+        if (cqe->res == -ENOBUFS) {
+            return 0;
+        }
+        if (-cqe->res == ECONNREFUSED) {
+            return 0;
+        }
+        fprintf(stderr, "uquic.c, uquic_listener_recv_cqe(): recvmsg(): %s\n", strerror(-cqe->res));
+        return -1;
+    }
+
+    if (cqe->res == 0 || !(cqe->flags & IORING_CQE_F_BUFFER)) {
+        return 0;
+    }
+
+    bid = (unsigned short)(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
+    buf = l->bbuf + (size_t)bid * QUIC_RECV_BUF_SIZE;
+
+    o = io_uring_recvmsg_validate(buf, cqe->res, &l->rmsg);
+
+    if (o == NULL) {
+        uquic_bufring_recycle(l->bring, l->bbuf, bid);
+        return 0;
+    }
+
+    name = io_uring_recvmsg_name(o);
+    payload = io_uring_recvmsg_payload(o, &l->rmsg);
+    paylen = io_uring_recvmsg_payload_length(o, cqe->res, &l->rmsg);
+
+    if (o->namelen > sizeof(l->peer_addr) || paylen == 0) {
+        uquic_bufring_recycle(l->bring, l->bbuf, bid);
+        return 0;
+    }
+
+    memcpy(&l->peer_addr, name, o->namelen);
+    l->peer_len = o->namelen;
+
+    uquic_listener_route(l, payload, paylen);
+
+    uquic_bufring_recycle(l->bring, l->bbuf, bid);
+
+    return 1;
+}
+
 static int uquic_listener_pump(struct uquic_listener *l, int max_wait_ms) {
-    struct io_uring_sqe *rsqe;
-    struct __kernel_timespec ts;
-    struct msghdr msg;
-    struct iovec iov;
+    struct io_uring_cqe *cqe;
     ngtcp2_tstamp now, min_expiry = UINT64_MAX;
+    unsigned head;
+    unsigned seen = 0;
     size_t i;
     int timeout_ms;
-    int recv_res = 0;
-    int got_recv = 0;
-    int pending = 1;
+    int got_data = 0;
+    int result = 0;
 
     for (i = 0; i < l->nconns; i++) {
         struct uquic_conn *uc = l->conns[i];
@@ -458,77 +717,44 @@ static int uquic_listener_pump(struct uquic_listener *l, int max_wait_ms) {
         }
     }
 
-    memset(&msg, 0, sizeof(msg));
-    iov.iov_base = l->pktbuf;
-    iov.iov_len = sizeof(l->pktbuf);
-    msg.msg_name = &l->peer_addr;
-    msg.msg_namelen = sizeof(l->peer_addr);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    rsqe = io_uring_get_sqe(&l->ring);
-    if (rsqe == NULL) {
-        fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_get_sqe (recvmsg) returned NULL\n");
-        return -1;
-    }
-    io_uring_prep_recvmsg(rsqe, l->sock, &msg, 0);
-    io_uring_sqe_set_data(rsqe, (void *)(uintptr_t)1);
-
-    if (timeout_ms >= 0) {
-        struct io_uring_sqe *tsqe;
-
-        rsqe->flags |= IOSQE_IO_LINK;
-        ts.tv_sec = timeout_ms / 1000;
-        ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
-
-        tsqe = io_uring_get_sqe(&l->ring);
-        if (tsqe == NULL) {
-            fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_get_sqe (timeout) returned NULL\n");
-            return -1;
-        }
-        io_uring_prep_link_timeout(tsqe, &ts, 0);
-        io_uring_sqe_set_data(tsqe, (void *)(uintptr_t)2);
-        pending = 2;
-    }
-
-    if (io_uring_submit(&l->ring) < 0) {
-        fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_submit (recvmsg) failed\n");
+    if (uquic_listener_arm_recv(l) < 0) {
         return -1;
     }
 
-    while (pending > 0) {
-        struct io_uring_cqe *cqe;
-
-        if (quic_wait_cqe(&l->ring, &cqe) < 0) {
-            fprintf(stderr, "uquic.c, uquic_listener_pump(): io_uring_wait_cqe failed\n");
-            return -1;
-        }
-
-        if ((uintptr_t)io_uring_cqe_get_data(cqe) == 1) {
-            recv_res = cqe->res;
-            got_recv = 1;
-        }
-
-        io_uring_cqe_seen(&l->ring, cqe);
-        pending--;
-    }
-
-    if (!got_recv || recv_res == -ECANCELED) {
-        return 0;
-    }
-
-    if (recv_res < 0) {
-        if (-recv_res == ECONNREFUSED) {
-            return 0;
-        }
-        fprintf(stderr, "uquic.c, uquic_listener_pump(): recvmsg(): %s\n", strerror(-recv_res));
+    if (uquic_wait_timeout(&l->ring, timeout_ms, "uquic.c, uquic_listener_pump()") < 0) {
         return -1;
     }
 
-    l->peer_len = msg.msg_namelen;
-    uquic_listener_route(l, (size_t)recv_res);
+    io_uring_for_each_cqe(&l->ring, head, cqe) {
+        int rv;
 
-    return 1;
+        seen++;
+
+        if (uquic_cqe_is_send(cqe)) {
+            uquic_send_cqe(cqe);
+            continue;
+        }
+
+        if ((uintptr_t)io_uring_cqe_get_data(cqe) != 1) {
+            continue;
+        }
+
+        rv = uquic_listener_recv_cqe(l, cqe);
+
+        if (rv < 0) {
+            result = -1;
+        } else if (rv > 0) {
+            got_data = 1;
+        }
+    }
+
+    io_uring_cq_advance(&l->ring, seen);
+
+    if (result < 0) {
+        return -1;
+    }
+
+    return got_data;
 }
 
 static int uquic_conn_progress(struct uquic_conn *uc) {
@@ -602,13 +828,24 @@ uquic_conn *uquic_connect(const char *host, const char *port, const uquic_client
         return NULL;
     }
 
-    if (io_uring_queue_init(16, &uc->own_ring, 0) != 0) {
+    if (io_uring_queue_init(QUIC_RING_ENTRIES, &uc->own_ring, 0) != 0) {
         fprintf(stderr, "uquic.c, uquic_connect(): io_uring_queue_init failed\n");
         uquic_teardown(uc, 0);
         return NULL;
     }
 
     uc->ring = &uc->own_ring;
+
+    if (io_uring_register_files(&uc->own_ring, &uc->sock, 1) != 0) {
+        fprintf(stderr, "uquic.c, uquic_connect(): io_uring_register_files failed\n");
+        uquic_teardown(uc, 1);
+        return NULL;
+    }
+
+    if (uquic_bufring_setup(&uc->own_ring, &uc->bring, &uc->bbuf) != 0) {
+        uquic_teardown(uc, 1);
+        return NULL;
+    }
 
     while (!uc->handshake_done) {
         if (uquic_pump(uc) != 0) {
@@ -648,8 +885,25 @@ uquic_listener *uquic_listen(const char *host, const char *port, const char *cer
         return NULL;
     }
 
-    if (io_uring_queue_init(64, &l->ring, 0) != 0) {
+    if (io_uring_queue_init(QUIC_LISTENER_RING_ENTRIES, &l->ring, 0) != 0) {
         fprintf(stderr, "uquic.c, uquic_listen(): io_uring_queue_init failed\n");
+        SSL_CTX_free(l->ssl_ctx);
+        close(l->sock);
+        free(l);
+        return NULL;
+    }
+
+    if (io_uring_register_files(&l->ring, &l->sock, 1) != 0) {
+        fprintf(stderr, "uquic.c, uquic_listen(): io_uring_register_files failed\n");
+        io_uring_queue_exit(&l->ring);
+        SSL_CTX_free(l->ssl_ctx);
+        close(l->sock);
+        free(l);
+        return NULL;
+    }
+
+    if (uquic_bufring_setup(&l->ring, &l->bring, &l->bbuf) != 0) {
+        io_uring_queue_exit(&l->ring);
         SSL_CTX_free(l->ssl_ctx);
         close(l->sock);
         free(l);
@@ -668,6 +922,7 @@ void uquic_listener_close(uquic_listener *listener) {
         uquic_teardown(l->conns[0], 0);
     }
 
+    uquic_bufring_free(&l->ring, l->bring, l->bbuf);
     io_uring_queue_exit(&l->ring);
     SSL_CTX_free(l->ssl_ctx);
     close(l->sock);
@@ -757,7 +1012,7 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
     struct uquic_conn *uc = conn;
     const size_t cap = sizeof(uc->txbuf);
     size_t copied = 0;
-    size_t send_pending = 0;
+    size_t slot;
     int fin_done = 0;
 
     for (;;) {
@@ -767,8 +1022,15 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
         size_t datavcnt;
         int64_t wstream_id;
         uint32_t wflags;
-        struct io_uring_sqe *sqe;
         ngtcp2_tstamp now = quic_timestamp();
+
+        while (uc->sbuf_inflight == QUIC_SEND_BATCH) {
+            if (uquic_reap_one(uc) < 0) {
+                return -1;
+            }
+        }
+
+        slot = uc->sbuf_next;
 
         while (copied < len) {
             size_t staged = (size_t)(uc->tx_written - uc->tx_acked);
@@ -822,7 +1084,7 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
             wflags = 0;
         }
 
-        wlen = ngtcp2_conn_writev_stream(uc->conn, &uc->ps.path, &uc->pi, uc->sbuf[send_pending], sizeof(uc->sbuf[send_pending]), &datalen, wflags, wstream_id, datav, datavcnt, now);
+        wlen = ngtcp2_conn_writev_stream(uc->conn, &uc->ps.path, &uc->pi, uc->sbuf[slot], sizeof(uc->sbuf[slot]), &datalen, wflags, wstream_id, datav, datavcnt, now);
 
         if (wlen < 0) {
             fprintf(stderr, "uquic.c, uquic_send(): ngtcp2_conn_writev_stream failed\n");
@@ -830,16 +1092,6 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
         }
 
         if (wlen == 0) {
-            if (send_pending > 0) {
-                int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_send()");
-
-                send_pending = 0;
-
-                if (fr != 0) {
-                    return -1;
-                }
-            }
-
             if (copied < len || uc->tx_sent < uc->tx_written || (fin && !fin_done)) {
                 if (uquic_conn_progress(uc) != 0) {
                     fprintf(stderr, "uquic.c, uquic_send(): connection failed with %llu of %zu bytes sent\n", (unsigned long long)uc->tx_sent, len);
@@ -862,26 +1114,20 @@ int uquic_send(uquic_conn *conn, int64_t stream_id, const uint8_t *data, size_t 
             }
         }
 
-        sqe = io_uring_get_sqe(uc->ring);
-        if (sqe == NULL) {
-            fprintf(stderr, "uquic.c, uquic_send(): io_uring_get_sqe (send) returned NULL\n");
+        if (uquic_queue_send(uc, uc->sbuf[slot], (size_t)wlen) < 0) {
             return -1;
         }
-        uquic_prep_send(uc, sqe, uc->sbuf[send_pending], (size_t)wlen);
-        send_pending++;
 
-        if (send_pending == QUIC_SEND_BATCH) {
-            int fr = quic_flush_sends(uc->ring, send_pending, "uquic.c, uquic_send()");
-
-            send_pending = 0;
-
-            if (fr != 0) {
-                return -1;
-            }
-        }
+        uc->sbuf_next = (slot + 1) % QUIC_SEND_BATCH;
     }
 
     if (uquic_rand_failed(uc, "uquic.c, uquic_send()")) {
+        return -1;
+    }
+
+    if (io_uring_submit(uc->ring) < 0) {
+        fprintf(stderr, "uquic.c, uquic_send(): io_uring_submit failed\n");
+        uc->failed = 1;
         return -1;
     }
 
@@ -1005,66 +1251,60 @@ static void uquic_close_linger(struct uquic_conn *uc, size_t pktlen) {
     }
 
     while (now < deadline) {
-        struct io_uring_sqe *rsqe, *tsqe, *ssqe;
         struct io_uring_cqe *cqe;
-        struct __kernel_timespec ts;
         ngtcp2_duration left = deadline - now;
         ngtcp2_duration wait = quiet < left ? quiet : left;
         int timeout_ms = (int)((wait + NGTCP2_MILLISECONDS - 1) / NGTCP2_MILLISECONDS);
-        int recv_res = 0;
-        int got_recv = 0;
-        int pending = 2;
+        unsigned head;
+        unsigned seen = 0;
+        int got_data = 0;
 
-        rsqe = io_uring_get_sqe(uc->ring);
-        if (rsqe == NULL) {
+        if (uquic_arm_recv(uc) < 0) {
             return;
         }
-        io_uring_prep_recv(rsqe, uc->sock, uc->pktbuf, sizeof(uc->pktbuf), 0);
-        io_uring_sqe_set_data(rsqe, (void *)(uintptr_t)1);
-        rsqe->flags |= IOSQE_IO_LINK;
 
-        ts.tv_sec = timeout_ms / 1000;
-        ts.tv_nsec = (long long)(timeout_ms % 1000) * 1000000;
-
-        tsqe = io_uring_get_sqe(uc->ring);
-        if (tsqe == NULL) {
+        if (uquic_wait_timeout(uc->ring, timeout_ms, "uquic.c, uquic_close_linger()") < 0) {
             return;
         }
-        io_uring_prep_link_timeout(tsqe, &ts, 0);
-        io_uring_sqe_set_data(tsqe, (void *)(uintptr_t)2);
+
+        io_uring_for_each_cqe(uc->ring, head, cqe) {
+            seen++;
+
+            if (uquic_cqe_is_send(cqe)) {
+                uquic_send_cqe(cqe);
+                continue;
+            }
+
+            if ((uintptr_t)io_uring_cqe_get_data(cqe) != 1) {
+                continue;
+            }
+
+            if (!(cqe->flags & IORING_CQE_F_MORE)) {
+                uc->recv_armed = 0;
+            }
+
+            if (cqe->flags & IORING_CQE_F_BUFFER) {
+                uquic_bufring_recycle(uc->bring, uc->bbuf, (unsigned short)(cqe->flags >> IORING_CQE_BUFFER_SHIFT));
+            }
+
+            if (cqe->res > 0) {
+                got_data = 1;
+            }
+        }
+
+        io_uring_cq_advance(uc->ring, seen);
+
+        if (!got_data) {
+            return;
+        }
+
+        if (uquic_queue_send(uc, uc->sbuf[0], pktlen) < 0) {
+            return;
+        }
 
         if (io_uring_submit(uc->ring) < 0) {
             return;
         }
-
-        while (pending > 0) {
-            if (quic_wait_cqe(uc->ring, &cqe) < 0) {
-                return;
-            }
-
-            if ((uintptr_t)io_uring_cqe_get_data(cqe) == 1) {
-                recv_res = cqe->res;
-                got_recv = 1;
-            }
-
-            io_uring_cqe_seen(uc->ring, cqe);
-            pending--;
-        }
-
-        if (!got_recv || recv_res < 0) {
-            return;
-        }
-
-        ssqe = io_uring_get_sqe(uc->ring);
-        if (ssqe == NULL) {
-            return;
-        }
-        uquic_prep_send(uc, ssqe, uc->sbuf[0], pktlen);
-
-        if (io_uring_submit(uc->ring) < 0 || quic_wait_cqe(uc->ring, &cqe) < 0) {
-            return;
-        }
-        io_uring_cqe_seen(uc->ring, cqe);
 
         now = quic_timestamp();
     }

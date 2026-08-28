@@ -15,6 +15,12 @@
 #include <ngtcp2/ngtcp2_crypto_ossl.h>
 
 #define QUIC_SEND_BATCH 8
+#define QUIC_RING_ENTRIES 64
+#define QUIC_LISTENER_RING_ENTRIES 256
+#define QUIC_FIXED_FD 0
+#define QUIC_RECV_BUFS 64
+#define QUIC_RECV_BUF_SIZE 2048
+#define QUIC_BGID 1
 #define QUIC_CIDLEN 8
 #define QUIC_CONN_CIDS 8
 #define QUIC_MAX_CONNS 64
@@ -46,11 +52,16 @@ struct uquic_conn {
     ngtcp2_pkt_info pi;
     struct io_uring *ring;
     struct io_uring own_ring;
+    struct io_uring_buf_ring *bring;
+    uint8_t *bbuf;
+    int recv_armed;
 
     ngtcp2_cid cids[QUIC_CONN_CIDS];
     size_t ncids;
 
     uint8_t sbuf[QUIC_SEND_BATCH][1452];
+    size_t sbuf_next;
+    size_t sbuf_inflight;
     uint8_t pktbuf[65536];
 
     int64_t recv_stream_id;
@@ -74,6 +85,11 @@ struct uquic_listener {
     struct sockaddr_storage peer_addr;
     socklen_t peer_len;
     uint8_t pktbuf[65536];
+
+    struct io_uring_buf_ring *bring;
+    uint8_t *bbuf;
+    int recv_armed;
+    struct msghdr rmsg;
 };
 
 int quic_create_socket(const char *host, const char *port);

@@ -595,6 +595,7 @@ int quic_setup_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl_ctx, s
     params.initial_max_stream_data_bidi_remote = 65536;
     params.initial_max_data = 65536;
     params.max_idle_timeout = 30 * NGTCP2_SECONDS;
+    params.max_udp_payload_size = 1452;
 
     if (ngtcp2_conn_client_new(&conn, &dcid, &scid, &ps->path, NGTCP2_PROTO_VER_V1, &callbacks, &settings, &params, NULL, uc) != 0) {
         fprintf(stderr, "quic.c, quic_setup_conn(): ngtcp2_conn_client_new failed\n");
@@ -636,6 +637,7 @@ int quic_setup_server_conn(ngtcp2_path_storage *ps, ngtcp2_crypto_ossl_ctx *ossl
     params.initial_max_stream_data_bidi_remote = 65536;
     params.initial_max_data = 65536;
     params.max_idle_timeout = 30 * NGTCP2_SECONDS;
+    params.max_udp_payload_size = 1452;
     params.original_dcid = hd->dcid;
     params.original_dcid_present = 1;
 
